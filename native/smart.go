@@ -6,27 +6,31 @@ import (
 	"strings"
 )
 
-const uploadPack = "git-upload-pack"
-const receivePack = "git-receive-pack"
-const flush = "0000"
-const delimiter = "0001"
-const packetMax = 65520
+const (
+	uploadPack  = "git-upload-pack"
+	receivePack = "git-receive-pack"
+	flush       = "0000"
+	delimiter   = "0001"
+	packetMax   = 65520
+)
+
+func packetHeader(dst []byte, size int) []byte {
+	const hex = "0123456789abcdef"
+	return append(dst, hex[size>>12], hex[size>>8&15], hex[size>>4&15], hex[size&15])
+}
 
 func pkt(dst []byte, body string) []byte {
-	const hex = "0123456789abcdef"
 	size := len(body) + 4
 	if size > packetMax {
 		fail(400, "Git packet is too large")
 	}
-	return append(append(dst, hex[size>>12], hex[size>>8&15], hex[size>>4&15], hex[size&15]), body...)
+	return append(packetHeader(dst, size), body...)
 }
 
 func sideband(dst, payload []byte) []byte {
-	const hex = "0123456789abcdef"
 	for len(payload) > 0 {
 		n := min(len(payload), packetMax-5)
-		size := n + 5
-		dst = append(dst, hex[size>>12], hex[size>>8&15], hex[size>>4&15], hex[size&15], 1)
+		dst = append(packetHeader(dst, n+5), 1)
 		dst = append(dst, payload[:n]...)
 		payload = payload[n:]
 	}
@@ -71,9 +75,15 @@ func packetList(lines ...string) []byte {
 	return append(b, flush...)
 }
 
-var v2Advertisement = packetList("version 2\n", "agent=forge/1.0\n", "ls-refs=unborn\n", "fetch=shallow\n", "object-format=sha1\n")
-var serviceUploadPrefix = append(pkt(nil, "# service="+uploadPack+"\n"), flush...)
-var serviceReceivePrefix = append(pkt(nil, "# service="+receivePack+"\n"), flush...)
+var v2Advertisement = packetList(
+	"version 2\n",
+	"agent=forge/1.0\n",
+	"ls-refs=unborn\n",
+	"fetch=shallow\n",
+	"object-format=sha1\n",
+)
+var serviceUploadPrefix = packetList("# service=" + uploadPack + "\n")
+var serviceReceivePrefix = packetList("# service=" + receivePack + "\n")
 
 func (r *repository) peel(sha string) string {
 	start := sha
@@ -96,7 +106,6 @@ func (r *repository) advertise(service string, v2 bool) []byte {
 	}
 	capabilities := "report-status side-band-64k delete-refs ofs-delta"
 	prefix := serviceReceivePrefix
-	refs := sortedKeys(r.refs)
 	var b []byte
 	first := true
 	write := func(ref, sha string) {
@@ -115,7 +124,7 @@ func (r *repository) advertise(service string, v2 bool) []byte {
 			write("HEAD", head)
 		}
 	}
-	for _, ref := range refs {
+	for _, ref := range sortedKeys(r.refs) {
 		sha := r.refs[ref]
 		write(ref, sha)
 		if service == uploadPack && strings.HasPrefix(ref, "refs/tags/") {
@@ -153,6 +162,31 @@ func validRef(ref string) bool {
 
 type refUpdate struct{ old, next, ref string }
 
+func (r *repository) updateRef(update refUpdate) string {
+	current := r.refs[update.ref]
+	if current == "" {
+		current = zeroOID
+	}
+	if update.next != zeroOID {
+		obj := r.objects[update.next]
+		if obj == nil || (strings.HasPrefix(update.ref, "refs/heads/") && obj.kind != commitKind) {
+			return "missing object"
+		}
+		if current != zeroOID && !r.objects.isAncestor(current, update.next) {
+			return "non-fast-forward"
+		}
+	}
+	if update.old != current {
+		return "stale ref"
+	}
+	if update.next == zeroOID {
+		r.deleteRef(update.ref)
+	} else {
+		r.setRef(update.ref, update.next)
+	}
+	return ""
+}
+
 func (r *repository) receive(data []byte) []byte {
 	lines, payload := readPackets(data, true)
 	if len(lines) == 0 {
@@ -168,7 +202,7 @@ func (r *repository) receive(data []byte) []byte {
 		if !oid(old) || !oid(next) || !validRef(ref) {
 			fail(400, "Invalid ref command")
 		}
-		updates = append(updates, refUpdate{old, next, ref})
+		updates = append(updates, refUpdate{old: old, next: next, ref: ref})
 		needsPack = needsPack || next != zeroOID
 	}
 	unpackError := ""
@@ -177,9 +211,9 @@ func (r *repository) receive(data []byte) []byte {
 		if !ok {
 			unpackError = "invalid pack"
 		} else {
-			for id, o := range incoming {
+			for id, item := range incoming {
 				if r.objects[id] == nil {
-					r.objects[id] = o
+					r.objects[id] = item
 					r.uploadCache = nil
 				}
 			}
@@ -191,38 +225,21 @@ func (r *repository) receive(data []byte) []byte {
 	} else {
 		b = pkt(b, "unpack "+unpackError+"\n")
 	}
-	for _, u := range updates {
-		current := r.refs[u.ref]
-		if current == "" {
-			current = zeroOID
-		}
+	for _, update := range updates {
 		reason := unpackError
-		if reason == "" && u.next != zeroOID {
-			o := r.objects[u.next]
-			if o == nil || strings.HasPrefix(u.ref, "refs/heads/") && o.kind != commitKind {
-				reason = "missing object"
-			} else if current != zeroOID && !r.objects.isAncestor(current, u.next) {
-				reason = "non-fast-forward"
-			}
-		}
-		if reason == "" && u.old != current {
-			reason = "stale ref"
+		if reason == "" {
+			reason = r.updateRef(update)
 		}
 		if reason != "" {
-			b = pkt(b, "ng "+u.ref+" "+reason+"\n")
+			b = pkt(b, "ng "+update.ref+" "+reason+"\n")
 			continue
 		}
-		if u.next == zeroOID {
-			r.deleteRef(u.ref)
-		} else {
-			r.setRef(u.ref, u.next)
-		}
-		b = pkt(b, "ok "+u.ref+"\n")
+		b = pkt(b, "ok "+update.ref+"\n")
 	}
 	report, side := false, false
-	for cap := range strings.FieldsSeq(features) {
-		report = report || cap == "report-status" || cap == "report-status-v2"
-		side = side || cap == "side-band-64k"
+	for capability := range strings.FieldsSeq(features) {
+		report = report || capability == "report-status" || capability == "report-status-v2"
+		side = side || capability == "side-band-64k"
 	}
 	if report {
 		b = append(b, flush...)
@@ -300,7 +317,7 @@ type visit struct {
 func (r *repository) walk(roots []string, depth int, stops map[string]bool) ([]visit, map[string]bool) {
 	pending := make([]visit, 0, len(roots))
 	for _, sha := range roots {
-		pending = append(pending, visit{sha, 1})
+		pending = append(pending, visit{sha: sha, depth: 1})
 	}
 	items := make([]visit, 0, len(roots))
 	seen := make(map[string]bool, len(roots))
@@ -318,22 +335,22 @@ func (r *repository) walk(roots []string, depth int, stops map[string]bool) ([]v
 		switch o.kind {
 		case commitKind:
 			if o.tree != "" {
-				pending = append(pending, visit{o.tree, item.depth})
+				pending = append(pending, visit{sha: o.tree, depth: item.depth})
 			}
 			if (depth == 0 || item.depth < depth) && !stops[item.sha] {
 				for _, sha := range o.parents {
-					pending = append(pending, visit{sha, item.depth + 1})
+					pending = append(pending, visit{sha: sha, depth: item.depth + 1})
 				}
 			}
 		case treeKind:
-			for _, e := range o.entries() {
-				if e.mode != "160000" {
-					pending = append(pending, visit{e.sha, item.depth})
+			for _, entry := range o.entries() {
+				if entry.mode != "160000" {
+					pending = append(pending, visit{sha: entry.sha, depth: item.depth})
 				}
 			}
 		case tagKind:
 			if target := o.target(); target != "" {
-				pending = append(pending, visit{target, item.depth})
+				pending = append(pending, visit{sha: target, depth: item.depth})
 			}
 		}
 	}
@@ -454,7 +471,7 @@ func (r *repository) upload(body []byte, v2 bool) []byte {
 	case v2 && lines[0] == "command=ls-refs":
 		reply = r.listRefs(lines[1:])
 		save = true
-	case v2 && lines[0] == "command=fetch" || !v2 && strings.HasPrefix(lines[0], "want "):
+	case (v2 && lines[0] == "command=fetch") || (!v2 && strings.HasPrefix(lines[0], "want ")):
 		reply, save = r.fetch(lines, v2)
 	default:
 		fail(400, "Unknown upload-pack command")
@@ -504,7 +521,7 @@ func (f *forge) smartHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	data := requestBody(w, req, 64<<20)
 	media := "application/x-" + service + "-result"
-	// Most upload requests hit the small per-repository cache and only need a read lock.
+	// Cached replies are immutable and remain safe to send after unlocking.
 	if v2 && len(data) <= 1024 {
 		f.mu.RLock()
 		repo := f.findRepo(owner, name)

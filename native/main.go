@@ -25,20 +25,25 @@ type fault struct {
 	message string
 }
 
-func fail(status int, message string) { panic(fault{status, message}) }
-func missing()                        { fail(404, "Not Found") }
+func fail(status int, message string) {
+	panic(fault{status: status, message: message})
+}
+
+func missing() { fail(404, "Not Found") }
 
 func sendJSON(w http.ResponseWriter, status int, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		panic(err)
 	}
-	sendBytes(w, status, "application/json; charset=utf-8", data)
+	sendBytes(w, status, jsonMedia, data)
 }
 
 func sendBytes(w http.ResponseWriter, status int, media string, data []byte) {
 	if response, ok := w.(*wireResponse); ok {
-		response.media, response.status, response.data = media, status, data
+		response.media = media
+		response.status = status
+		response.data = data
 		return
 	}
 	w.Header().Set("Content-Type", media)
@@ -50,12 +55,15 @@ func sendBytes(w http.ResponseWriter, status int, media string, data []byte) {
 	}
 }
 
+const jsonBodyLimit = 16 << 20
+
 func requestBody(w http.ResponseWriter, r *http.Request, limit int64) []byte {
-	if r.ContentLength > limit {
+	size := r.ContentLength
+	if size > limit {
 		fail(400, "Invalid request body")
 	}
-	if r.ContentLength > 0 && r.ContentLength <= 16<<10 {
-		data := make([]byte, int(r.ContentLength))
+	if size > 0 && size <= 16<<10 {
+		data := make([]byte, int(size))
 		if _, err := io.ReadFull(r.Body, data); err != nil {
 			fail(400, "Invalid request body")
 		}
@@ -69,11 +77,10 @@ func requestBody(w http.ResponseWriter, r *http.Request, limit int64) []byte {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	if r.ContentLength > 16<<20 {
+	if r.ContentLength > jsonBodyLimit {
 		return false
 	}
-	data := requestBody(w, r, 16<<20)
-	return json.Unmarshal(data, out) == nil
+	return json.Unmarshal(requestBody(w, r, jsonBodyLimit), out) == nil
 }
 
 func readInput(w http.ResponseWriter, r *http.Request) fields {
@@ -84,18 +91,22 @@ func readInput(w http.ResponseWriter, r *http.Request) fields {
 	return input
 }
 
-func text(v any) string { s, _ := v.(string); return s }
+func text(v any) string {
+	value, _ := v.(string)
+	return value
+}
+
 func integer(v any) int {
 	switch n := v.(type) {
 	case int:
 		return n
 	case float64:
-		if n == float64(int(n)) {
+		if float64(int(n)) == n {
 			return int(n)
 		}
 	case string:
-		i, _ := strconv.Atoi(n)
-		return i
+		value, _ := strconv.Atoi(n)
+		return value
 	}
 	return 0
 }
@@ -115,11 +126,16 @@ func newForge() *forge {
 	if login == "" {
 		login = "adaiversen"
 	}
-	token := os.Getenv("MAKEFUN_SHOP_TOKEN")
-	if token != "" {
-		token = "Bearer " + token
+	authorization := os.Getenv("MAKEFUN_SHOP_TOKEN")
+	if authorization != "" {
+		authorization = "Bearer " + authorization
 	}
-	return &forge{authorization: token, login: login, repos: map[string]*repository{}, repoIDs: map[int]*repository{}}
+	return &forge{
+		authorization: authorization,
+		login:         login,
+		repos:         make(map[string]*repository),
+		repoIDs:       make(map[int]*repository),
+	}
 }
 
 func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -134,19 +150,20 @@ func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	path := r.URL.Path
-	rest := path == "/api/v3" || strings.HasPrefix(path, "/api/v3/")
-	if rest {
-		w.Header().Set("X-GitHub-Request-Id", strconv.FormatUint(f.requests.Add(1), 16))
+	isREST := path == "/api/v3" || strings.HasPrefix(path, "/api/v3/")
+	if isREST {
+		requestID := strconv.FormatUint(f.requests.Add(1), 16)
+		w.Header().Set("X-GitHub-Request-Id", requestID)
 	}
 	if path == "/healthz" && r.Method == "GET" {
-		sendBytes(w, 200, "application/json; charset=utf-8", []byte("{\"ok\":true}"))
+		sendBytes(w, 200, jsonMedia, []byte("{\"ok\":true}"))
 		return
 	}
 	if f.authorization == "" || r.Header.Get("Authorization") != f.authorization {
 		fail(401, "Bad credentials")
 	}
 	switch {
-	case rest:
+	case isREST:
 		f.rest(w, r)
 	case r.Method == "POST" && path == "/api/graphql":
 		f.graphql(w, r)

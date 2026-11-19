@@ -31,31 +31,33 @@ func invalidGraph(message string) { panic(graphError(message)) }
 
 func parseDocument(query string, vars fields) *document {
 	query = strings.TrimPrefix(query, "\ufeff")
-	d := &document{vars: vars}
-	if d.vars == nil {
-		d.vars = fields{}
+	if vars == nil {
+		vars = fields{}
 	}
+	d := &document{vars: vars}
 	end := 0
-	for _, m := range lexer.FindAllStringSubmatchIndex(query, -1) {
-		if m[0] != end {
+	for _, match := range lexer.FindAllStringSubmatchIndex(query, -1) {
+		if match[0] != end {
 			invalidGraph("Invalid GraphQL token")
 		}
-		if m[2] >= 0 {
-			d.tokens = append(d.tokens, query[m[2]:m[3]])
+		if match[2] >= 0 {
+			d.tokens = append(d.tokens, query[match[2]:match[3]])
 		}
-		end = m[1]
+		end = match[1]
 	}
 	if end != len(query) {
 		invalidGraph("Invalid GraphQL token")
 	}
 	return d
 }
+
 func (d *document) peek() string {
 	if d.pos < len(d.tokens) {
 		return d.tokens[d.pos]
 	}
 	return ""
 }
+
 func (d *document) take() string {
 	token := d.peek()
 	if token == "" {
@@ -64,6 +66,7 @@ func (d *document) take() string {
 	d.pos++
 	return token
 }
+
 func (d *document) accept(token string) bool {
 	if d.peek() != token {
 		return false
@@ -71,11 +74,13 @@ func (d *document) accept(token string) bool {
 	d.pos++
 	return true
 }
+
 func (d *document) expect(token string) {
 	if !d.accept(token) {
 		invalidGraph("Expected " + token)
 	}
 }
+
 func (d *document) name() string {
 	token := d.take()
 	if !gqlName.MatchString(token) {
@@ -83,6 +88,7 @@ func (d *document) name() string {
 	}
 	return token
 }
+
 func (d *document) value(depth int) any {
 	if depth >= 32 {
 		invalidGraph("GraphQL value is too deep")
@@ -103,7 +109,7 @@ func (d *document) value(depth int) any {
 		return list
 	}
 	token := d.take()
-	if token[0] == '"' || token[0] == '-' || token[0] >= '0' && token[0] <= '9' || token == "null" || token == "true" || token == "false" {
+	if token[0] == '"' || token[0] == '-' || (token[0] >= '0' && token[0] <= '9') || token == "null" || token == "true" || token == "false" {
 		var value any
 		if json.Unmarshal([]byte(token), &value) != nil {
 			invalidGraph("Invalid GraphQL value")
@@ -115,6 +121,7 @@ func (d *document) value(depth int) any {
 	}
 	return token
 }
+
 func (d *document) properties(end string, depth int) fields {
 	out := fields{}
 	for !d.accept(end) {
@@ -124,6 +131,7 @@ func (d *document) properties(end string, depth int) fields {
 	}
 	return out
 }
+
 func (d *document) variableType(depth int) {
 	if depth >= 32 {
 		invalidGraph("GraphQL type is too deep")
@@ -136,6 +144,7 @@ func (d *document) variableType(depth int) {
 	}
 	d.accept("!")
 }
+
 func (d *document) selections(depth int) []selection {
 	if depth >= 32 {
 		invalidGraph("GraphQL selection is too deep")
@@ -166,6 +175,25 @@ func (d *document) selections(depth int) []selection {
 	}
 	return out
 }
+
+func (d *document) variables() {
+	if !d.accept("(") {
+		return
+	}
+	for !d.accept(")") {
+		d.expect("$")
+		name := d.name()
+		d.expect(":")
+		d.variableType(0)
+		if d.accept("=") {
+			fallback := d.value(0)
+			if _, ok := d.vars[name]; !ok {
+				d.vars[name] = fallback
+			}
+		}
+	}
+}
+
 func (d *document) parse() (string, []selection) {
 	kind := "Query"
 	if d.peek() != "{" {
@@ -179,26 +207,13 @@ func (d *document) parse() (string, []selection) {
 		if d.peek() != "(" && d.peek() != "{" {
 			d.name()
 		}
-		if d.accept("(") {
-			for !d.accept(")") {
-				d.expect("$")
-				name := d.name()
-				d.expect(":")
-				d.variableType(0)
-				if d.accept("=") {
-					fallback := d.value(0)
-					if _, ok := d.vars[name]; !ok {
-						d.vars[name] = fallback
-					}
-				}
-			}
-		}
+		d.variables()
 	}
-	fields := d.selections(0)
+	selections := d.selections(0)
 	if d.peek() != "" {
 		invalidGraph("Unexpected tokens after operation")
 	}
-	return kind, fields
+	return kind, selections
 }
 
 var graphSchema = map[string]map[string]string{
@@ -228,9 +243,9 @@ var graphSchema = map[string]map[string]string{
 	"CommentEdge":    {"node": "IssueComment"},
 }
 
-func validateGraph(kind string, selection []selection) {
+func validateGraph(kind string, selections []selection) {
 	schema := graphSchema[kind]
-	for _, s := range selection {
+	for _, s := range selections {
 		if s.on != "" {
 			if graphSchema[s.on] == nil {
 				invalidGraph("Unknown type " + s.on)
@@ -260,13 +275,16 @@ type graphView struct {
 	resolve func(string, fields) any
 }
 
-func view(kind string, values fields) *graphView { return &graphView{kind: kind, values: values} }
-func project(v *graphView, selection []selection) fields {
+func view(kind string, values fields) *graphView {
+	return &graphView{kind: kind, values: values}
+}
+
+func project(v *graphView, selections []selection) fields {
 	if v == nil {
 		return nil
 	}
 	out := fields{}
-	for _, s := range selection {
+	for _, s := range selections {
 		if s.on != "" {
 			if s.on == v.kind || s.on == "Node" {
 				for k, value := range project(v, s.children) {
@@ -298,9 +316,11 @@ func project(v *graphView, selection []selection) fields {
 	}
 	return out
 }
+
 func globalID(kind string, repo, number int) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(kind + ":" + strconv.Itoa(repo) + ":" + strconv.Itoa(number)))
 }
+
 func (f *forge) lookupID(value any, expected string) (string, *repository, int) {
 	raw, err := base64.RawURLEncoding.DecodeString(text(value))
 	if err != nil {
@@ -309,7 +329,7 @@ func (f *forge) lookupID(value any, expected string) (string, *repository, int) 
 	kind, tail, _ := strings.Cut(string(raw), ":")
 	a, b, _ := strings.Cut(tail, ":")
 	id, number := integer(a), integer(b)
-	if expected != "" && kind != expected || globalID(kind, id, number) != value {
+	if (expected != "" && kind != expected) || globalID(kind, id, number) != value {
 		return "", nil, 0
 	}
 	return kind, f.repoIDs[id], number
@@ -321,6 +341,7 @@ type edge struct {
 }
 
 func cursor(key string) string { return base64.RawURLEncoding.EncodeToString([]byte("cursor:" + key)) }
+
 func connection(kind, edgeKind string, items []edge, args fields) *graphView {
 	offset, count := 0, 30
 	if after := text(args["after"]); after != "" {
@@ -344,28 +365,49 @@ func connection(kind, edgeKind string, items []edge, args fields) *graphView {
 	if len(page) > 0 {
 		start, end = cursor(page[0].key), cursor(page[len(page)-1].key)
 	}
-	return view(kind, fields{"nodes": nodes, "edges": edges, "totalCount": len(items), "pageInfo": view("PageInfo", fields{
-		"hasNextPage": offset+len(page) < len(items), "hasPreviousPage": offset > 0, "startCursor": start, "endCursor": end,
-	})})
+	info := view("PageInfo", fields{
+		"hasNextPage":     offset+len(page) < len(items),
+		"hasPreviousPage": offset > 0,
+		"startCursor":     start,
+		"endCursor":       end,
+	})
+	return view(kind, fields{"nodes": nodes, "edges": edges, "totalCount": len(items), "pageInfo": info})
 }
+
 func issueView(r *repository, i *issue) *graphView {
 	if i == nil {
 		return nil
 	}
-	return view("Issue", fields{"id": globalID("Issue", r.info.ID, i.Number), "number": i.Number, "title": i.Title, "body": i.Body, "state": strings.ToUpper(i.State)})
+	return view("Issue", fields{
+		"id":     globalID("Issue", r.info.ID, i.Number),
+		"number": i.Number,
+		"title":  i.Title,
+		"body":   i.Body,
+		"state":  strings.ToUpper(i.State),
+	})
 }
+
 func pullState(p *pull) string {
 	if p.Merged {
 		return "MERGED"
 	}
 	return strings.ToUpper(p.State)
 }
+
 func pullView(r *repository, p *pull) *graphView {
 	if p == nil {
 		return nil
 	}
-	v := view("PullRequest", fields{"id": globalID("PullRequest", r.info.ID, p.Number), "number": p.Number, "title": p.Title, "body": p.Body,
-		"state": pullState(p), "merged": p.Merged, "headRefName": p.Head.Ref, "baseRefName": p.Base.Ref})
+	v := view("PullRequest", fields{
+		"id":          globalID("PullRequest", r.info.ID, p.Number),
+		"number":      p.Number,
+		"title":       p.Title,
+		"body":        p.Body,
+		"state":       pullState(p),
+		"merged":      p.Merged,
+		"headRefName": p.Head.Ref,
+		"baseRefName": p.Base.Ref,
+	})
 	v.resolve = func(name string, args fields) any {
 		if name == "mergeable" {
 			if p.Merged {
@@ -386,10 +428,11 @@ func pullView(r *repository, p *pull) *graphView {
 	}
 	return v
 }
+
 func stateMatches(input any, state string) bool {
 	if states, ok := input.([]any); ok {
-		for _, s := range states {
-			if text(s) == state {
+		for _, candidate := range states {
+			if text(candidate) == state {
 				return true
 			}
 		}
@@ -397,6 +440,7 @@ func stateMatches(input any, state string) bool {
 	}
 	return true
 }
+
 func repoView(r *repository) *graphView {
 	if r == nil {
 		return nil
@@ -406,8 +450,16 @@ func repoView(r *repository) *graphView {
 	if r.refs[headRef(info.DefaultBranch)] != "" {
 		branch = view("Ref", fields{"name": info.DefaultBranch})
 	}
-	v := view("Repository", fields{"id": globalID("Repository", info.ID, 0), "databaseId": info.ID, "name": info.Name, "nameWithOwner": info.FullName,
-		"owner": view("User", fields{"login": info.Owner.Login}), "viewerPermission": "ADMIN", "hasIssuesEnabled": true, "defaultBranchRef": branch})
+	v := view("Repository", fields{
+		"id":               globalID("Repository", info.ID, 0),
+		"databaseId":       info.ID,
+		"name":             info.Name,
+		"nameWithOwner":    info.FullName,
+		"owner":            view("User", fields{"login": info.Owner.Login}),
+		"viewerPermission": "ADMIN",
+		"hasIssuesEnabled": true,
+		"defaultBranchRef": branch,
+	})
 	v.resolve = func(name string, args fields) any {
 		switch name {
 		case "issue":
@@ -436,6 +488,7 @@ func repoView(r *repository) *graphView {
 	}
 	return v
 }
+
 func typeView(name string) *graphView {
 	if name == "SearchType" {
 		values := []*graphView{}
@@ -452,12 +505,13 @@ func typeView(name string) *graphView {
 	if name == "Node" {
 		kind = "INTERFACE"
 	}
-	entries := []*graphView{}
+	entries := make([]*graphView, 0, len(schema))
 	for _, item := range sortedKeys(schema) {
 		entries = append(entries, view("__Field", fields{"name": item}))
 	}
 	return view("__Type", fields{"name": name, "kind": kind, "fields": entries})
 }
+
 func (f *forge) queryView() *graphView {
 	v := view("Query", fields{"viewer": view("User", fields{"login": f.login})})
 	v.resolve = func(name string, args fields) any {
@@ -484,6 +538,7 @@ func (f *forge) queryView() *graphView {
 	}
 	return v
 }
+
 func (f *forge) mutationView() *graphView {
 	v := view("Mutation", nil)
 	v.resolve = func(name string, args fields) any {
@@ -498,7 +553,8 @@ func (f *forge) mutationView() *graphView {
 				missing()
 			}
 			if name == "createIssue" {
-				return view("IssuePayload", fields{"issue": issueView(r, f.createIssue(r, inputIssue(in)))})
+				item := f.createIssue(r, inputIssue(in))
+				return view("IssuePayload", fields{"issue": issueView(r, item)})
 			}
 			p := f.createPull(r, fields{"title": in["title"], "body": in["body"], "head": in["headRefName"], "base": in["baseRefName"]})
 			return view("PullPayload", fields{"pullRequest": pullView(r, p)})
@@ -531,6 +587,7 @@ func (f *forge) mutationView() *graphView {
 	}
 	return v
 }
+
 func (f *forge) executeGraph(input any) (result fields) {
 	defer func() {
 		if e := recover(); e != nil {
@@ -560,6 +617,7 @@ func (f *forge) executeGraph(input any) (result fields) {
 	}
 	return fields{"data": project(root, selections)}
 }
+
 func (f *forge) graphql(w http.ResponseWriter, r *http.Request) {
 	var input any
 	if !decodeJSON(w, r, &input) {

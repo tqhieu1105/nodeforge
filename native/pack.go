@@ -10,8 +10,12 @@ import (
 	"sync"
 )
 
-const maxObject = 32 << 20
-const maxExpanded = 128 << 20
+const (
+	maxObject   = 32 << 20
+	maxExpanded = 128 << 20
+	offsetDelta = 6
+	refDelta    = 7
+)
 
 type invalidPack struct{}
 
@@ -20,36 +24,55 @@ func badPack() { panic(invalidPack{}) }
 type packReader struct{ data *bytes.Reader }
 
 func (p packReader) byte() byte {
-	n, e := p.data.ReadByte()
-	if e != nil {
+	value, err := p.data.ReadByte()
+	if err != nil {
 		badPack()
 	}
-	return n
+	return value
 }
+
 func (p packReader) take(n int) []byte {
 	if n < 0 || n > p.data.Len() {
 		badPack()
 	}
-	b := make([]byte, n)
-	if _, err := io.ReadFull(p.data, b); err != nil {
+	data := make([]byte, n)
+	if _, err := io.ReadFull(p.data, data); err != nil {
 		badPack()
 	}
-	return b
+	return data
 }
+
 func (p packReader) size(n int, shift uint, more bool) int {
 	for more {
 		if shift > 28 {
 			badPack()
 		}
-		b := p.byte()
-		n += int(b&127) << shift
-		more = b&128 != 0
+		part := p.byte()
+		n += int(part&127) << shift
+		more = part&128 != 0
 		shift += 7
 	}
 	if n > maxObject {
 		badPack()
 	}
 	return n
+}
+
+func (p packReader) deltaBase(start int) int {
+	part := p.byte()
+	distance := int(part & 127)
+	for part&128 != 0 {
+		part = p.byte()
+		distance = (distance+1)*128 + int(part&127)
+		if distance > start {
+			badPack()
+		}
+	}
+	base := start - distance
+	if base < 12 || base >= start {
+		badPack()
+	}
+	return base
 }
 
 func applyDelta(base, delta []byte) []byte {
@@ -142,7 +165,7 @@ func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
 	count := int(binary.BigEndian.Uint32(data[8:12]))
 	end := len(data) - 20
 	digest := sha1.Sum(data[:end])
-	if version != 2 && version != 3 || count > (end-12)/3 || !bytes.Equal(digest[:], data[end:]) {
+	if (version != 2 && version != 3) || count > (end-12)/3 || !bytes.Equal(digest[:], data[end:]) {
 		badPack()
 	}
 	p := packReader{bytes.NewReader(data[12:end])}
@@ -191,24 +214,12 @@ func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
 		if wireExpanded > maxExpanded {
 			badPack()
 		}
-		d := deltaEntry{offset: start}
+		delta := deltaEntry{offset: start}
 		switch kind {
-		case 6:
-			b := p.byte()
-			distance := int(b & 127)
-			for b&128 != 0 {
-				b = p.byte()
-				distance = (distance+1)*128 + int(b&127)
-				if distance > start {
-					badPack()
-				}
-			}
-			d.baseOffset = start - distance
-			if d.baseOffset < 12 || d.baseOffset >= start {
-				badPack()
-			}
-		case 7:
-			d.base = hex.EncodeToString(p.take(20))
+		case offsetDelta:
+			delta.baseOffset = p.deltaBase(start)
+		case refDelta:
+			delta.base = hex.EncodeToString(p.take(20))
 		case commitKind, treeKind, blobKind, tagKind:
 		default:
 			badPack()
@@ -219,9 +230,9 @@ func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
 				add(start, kind, decoded)
 			} else {
 				expanded += size
-				o := newObject(kind, decoded)
-				incoming[objectID(kind, decoded)] = o
-				positions = append(positions, positioned{start, o})
+				item := newObject(kind, decoded)
+				incoming[objectID(kind, decoded)] = item
+				positions = append(positions, positioned{offset: start, object: item})
 			}
 			continue
 		}
@@ -232,11 +243,11 @@ func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
 			}
 			positions = nil
 		}
-		d.data = decoded
-		if base := find(d); base != nil {
+		delta.data = decoded
+		if base := find(delta); base != nil {
 			add(start, base.kind, applyDelta(base.data, decoded))
 		} else {
-			pending = append(pending, d)
+			pending = append(pending, delta)
 		}
 	}
 	if p.data.Len() != 0 {
@@ -244,11 +255,11 @@ func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
 	}
 	for len(pending) > 0 {
 		next := pending[:0]
-		for _, d := range pending {
-			if base := find(d); base != nil {
-				add(d.offset, base.kind, applyDelta(base.data, d.data))
+		for _, delta := range pending {
+			if base := find(delta); base != nil {
+				add(delta.offset, base.kind, applyDelta(base.data, delta.data))
 			} else {
-				next = append(next, d)
+				next = append(next, delta)
 			}
 		}
 		if len(next) == len(pending) {

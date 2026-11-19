@@ -51,24 +51,28 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 		}
 	case "/api/v3/user":
 		if method == "GET" {
-			sendJSON(w, 200, user{f.login})
+			sendJSON(w, 200, user{Login: f.login})
 			return
 		}
 	case "/api/v3/user/repos":
-		if method == "POST" {
+		switch method {
+		case "POST":
 			input := readInput(w, req)
 			f.mu.Lock()
-			info := func() repoInfo { defer f.mu.Unlock(); return f.createRepo(input).info }()
+			info := func() repoInfo {
+				defer f.mu.Unlock()
+				return f.createRepo(input).info
+			}()
 			sendJSON(w, 201, info)
 			return
-		}
-		if method == "GET" {
+		case "GET":
 			f.listRepos(w, req)
 			return
 		}
 	}
-	owner, tail, ok := strings.Cut(strings.TrimPrefix(path, "/api/v3/repos/"), "/")
-	if !ok || !strings.HasPrefix(path, "/api/v3/repos/") {
+	repoPath, ok := strings.CutPrefix(path, "/api/v3/repos/")
+	owner, tail, hasRepo := strings.Cut(repoPath, "/")
+	if !ok || !hasRepo {
 		missing()
 	}
 	name, sub, _ := strings.Cut(tail, "/")
@@ -78,7 +82,10 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 			fail(400, "Expected a JSON object")
 		}
 		f.mu.Lock()
-		item := func() *issue { defer f.mu.Unlock(); return f.createIssue(f.requireRepo(owner, name), *input) }()
+		item := func() *issue {
+			defer f.mu.Unlock()
+			return f.createIssue(f.requireRepo(owner, name), *input)
+		}()
 		sendBytes(w, 201, jsonMedia, item.wire)
 		return
 	}
@@ -91,7 +98,7 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	var input fields
-	if method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE" && strings.HasPrefix(sub, "contents/") {
+	if method == "POST" || method == "PUT" || method == "PATCH" || (method == "DELETE" && strings.HasPrefix(sub, "contents/")) {
 		input = readInput(w, req)
 	}
 	if method == "GET" {
@@ -124,8 +131,8 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 	case "git/refs":
 		if method == "POST" {
 			ref, sha := text(input["ref"]), text(input["sha"])
-			o := repo.objects[sha]
-			if !strings.HasPrefix(ref, "refs/heads/") || !validRef(ref) || o == nil || o.tree == "" || repo.refs[ref] != "" {
+			obj := repo.objects[sha]
+			if !strings.HasPrefix(ref, "refs/heads/") || !validRef(ref) || obj == nil || obj.tree == "" || repo.refs[ref] != "" {
 				fail(422, "Invalid branch reference")
 			}
 			repo.setRef(ref, sha)
@@ -145,7 +152,8 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 		}
 	case "commits":
 		if method == "GET" {
-			sendJSON(w, 200, repo.commits(repo.resolve(req.URL.Query().Get("sha"))))
+			tip := repo.resolve(req.URL.Query().Get("sha"))
+			sendJSON(w, 200, repo.commits(tip))
 			return
 		}
 	case "labels":
@@ -154,7 +162,7 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 			if name == "" || color == "" {
 				fail(422, "Invalid label")
 			}
-			value := label{name, color}
+			value := label{Name: name, Color: color}
 			repo.labels[name] = value
 			sendJSON(w, 201, value)
 			return
@@ -182,7 +190,8 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 		file := strings.TrimPrefix(strings.TrimPrefix(sub, "contents"), "/")
 		switch method {
 		case "GET":
-			sendJSON(w, 200, repo.getContent(file, repo.resolve(req.URL.Query().Get("ref"))))
+			tip := repo.resolve(req.URL.Query().Get("ref"))
+			sendJSON(w, 200, repo.getContent(file, tip))
 			return
 		case "PUT", "DELETE":
 			status, data := repo.changeContent(file, input, method == "DELETE")
@@ -284,9 +293,9 @@ func (repo *repository) getContent(path, tip string) any {
 				missing()
 			}
 			found := false
-			for _, e := range repo.objects[sha].entries() {
-				if e.name == segment {
-					sha, mode, name = e.sha, e.mode, e.name
+			for _, entry := range repo.objects[sha].entries() {
+				if entry.name == segment {
+					sha, mode, name = entry.sha, entry.mode, entry.name
 					found = true
 					break
 				}
@@ -298,23 +307,31 @@ func (repo *repository) getContent(path, tip string) any {
 	}
 	if mode == "40000" {
 		items := []fields{}
-		for _, e := range repo.objects[sha].entries() {
-			kind, itemPath := "file", e.name
-			if e.mode == "40000" {
+		for _, entry := range repo.objects[sha].entries() {
+			kind, itemPath := "file", entry.name
+			if entry.mode == "40000" {
 				kind = "dir"
 			}
 			if path != "" {
-				itemPath = path + "/" + e.name
+				itemPath = path + "/" + entry.name
 			}
-			items = append(items, fields{"type": kind, "name": e.name, "path": itemPath, "sha": e.sha})
+			items = append(items, fields{"type": kind, "name": entry.name, "path": itemPath, "sha": entry.sha})
 		}
 		return items
 	}
-	o := repo.objects[sha]
-	if o == nil || o.kind != blobKind {
+	obj := repo.objects[sha]
+	if obj == nil || obj.kind != blobKind {
 		missing()
 	}
-	return fields{"type": "file", "name": name, "path": path, "sha": sha, "size": len(o.data), "encoding": "base64", "content": base64.StdEncoding.EncodeToString(o.data)}
+	return fields{
+		"type":     "file",
+		"name":     name,
+		"path":     path,
+		"sha":      sha,
+		"size":     len(obj.data),
+		"encoding": "base64",
+		"content":  base64.StdEncoding.EncodeToString(obj.data),
+	}
 }
 
 func (repo *repository) changeContent(path string, input fields, remove bool) (int, fields) {
@@ -364,7 +381,7 @@ func (repo *repository) changeContent(path string, input fields, remove bool) (i
 		if mode == "" {
 			mode = "100644"
 		}
-		files[path] = fileEntry{mode, blob}
+		files[path] = fileEntry{mode: mode, sha: blob}
 		if conflictPaths(files) {
 			fail(409, "Conflicting file path")
 		}

@@ -12,19 +12,23 @@ import (
 	"time"
 )
 
-// Each connection runs its requests in order. The forge never needs to
-// monitor a second read while a handler is preparing a response.
+// The connection handles requests in order, so the handler does not need
+// a background read while preparing a response.
 type httpListener struct {
 	net.Listener
-	handler  http.Handler
-	mu       sync.Mutex
-	active   map[net.Conn]struct{}
-	closed   bool
-	updating sync.WaitGroup
+	handler http.Handler
+	mu      sync.Mutex
+	active  map[net.Conn]struct{}
+	closed  bool
+	workers sync.WaitGroup
 }
 
 func newHTTPListener(listener net.Listener, handler http.Handler) *httpListener {
-	return &httpListener{Listener: listener, handler: handler, active: map[net.Conn]struct{}{}}
+	return &httpListener{
+		Listener: listener,
+		handler:  handler,
+		active:   make(map[net.Conn]struct{}),
+	}
 }
 
 func (s *httpListener) serve() error {
@@ -40,7 +44,7 @@ func (s *httpListener) serve() error {
 			continue
 		}
 		s.active[conn] = struct{}{}
-		s.updating.Add(1)
+		s.workers.Add(1)
 		s.mu.Unlock()
 		go s.connection(conn)
 	}
@@ -54,13 +58,13 @@ func (s *httpListener) stop() {
 		conn.Close()
 	}
 	s.mu.Unlock()
-	s.updating.Wait()
+	s.workers.Wait()
 }
 
 const maxHeader = 32 << 10
 
-// The bound only applies while ReadRequest parses the headers. Its Body can
-// then read the same buffered connection with the route's own size limit.
+// Header parsing has its own bound. The body is read from the same
+// buffered connection under the individual route's size limit.
 type headerReader struct {
 	conn    net.Conn
 	left    int
@@ -102,15 +106,24 @@ type wireResponse struct {
 }
 
 func (w *wireResponse) Header() http.Header { return w.headers }
+
 func (w *wireResponse) WriteHeader(status int) {
 	if w.status == 0 {
 		w.status = status
 	}
 }
+
 func (w *wireResponse) Write(p []byte) (int, error) {
 	w.WriteHeader(200)
 	w.data = append(w.data, p...)
 	return len(p), nil
+}
+
+func (w *wireResponse) reset() {
+	clear(w.headers)
+	w.status = 0
+	w.data = nil
+	w.media = ""
 }
 
 type headerBuffer struct{ data []byte }
@@ -125,7 +138,12 @@ func (b *headerBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-var framingHeaders = map[string]bool{"Content-Length": true, "Connection": true, "Date": true, "Content-Type": true}
+var framingHeaders = map[string]bool{
+	"Content-Length": true,
+	"Connection":     true,
+	"Date":           true,
+	"Content-Type":   true,
+}
 
 func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool, date string, buffer []byte) error {
 	status := w.status
@@ -143,8 +161,8 @@ func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool
 	buffer = append(buffer, "\r\nDate: "...)
 	buffer = append(buffer, date...)
 	buffer = append(buffer, "\r\n"...)
-	// The transport owns framing and connection management.
-	if status != 204 && status != 304 {
+	bodyAllowed := status != 204 && status != 304
+	if bodyAllowed {
 		buffer = append(buffer, "Content-Length: "...)
 		buffer = strconv.AppendInt(buffer, int64(len(w.data)), 10)
 		buffer = append(buffer, "\r\n"...)
@@ -159,9 +177,9 @@ func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool
 		buffer = append(buffer, w.media...)
 		buffer = append(buffer, "\r\n"...)
 	}
-	if len(w.headers) == 1 && len(w.headers["X-Github-Request-Id"]) == 1 {
+	if ids := w.headers["X-Github-Request-Id"]; len(w.headers) == 1 && len(ids) == 1 {
 		buffer = append(buffer, "X-Github-Request-Id: "...)
-		buffer = append(buffer, w.headers["X-Github-Request-Id"][0]...)
+		buffer = append(buffer, ids[0]...)
 		buffer = append(buffer, "\r\n"...)
 	} else {
 		head := headerBuffer{data: buffer}
@@ -171,7 +189,7 @@ func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool
 		buffer = head.data
 	}
 	buffer = append(buffer, "\r\n"...)
-	if request.Method == "HEAD" || status == 204 || status == 304 || len(w.data) == 0 {
+	if request.Method == "HEAD" || !bodyAllowed || len(w.data) == 0 {
 		_, err := conn.Write(buffer)
 		return err
 	}
@@ -192,7 +210,7 @@ func (s *httpListener) connection(conn net.Conn) {
 		s.mu.Lock()
 		delete(s.active, conn)
 		s.mu.Unlock()
-		s.updating.Done()
+		s.workers.Done()
 	}()
 	in := &headerReader{conn: conn}
 	reader := bufio.NewReaderSize(in, 4096)
@@ -203,8 +221,7 @@ func (s *httpListener) connection(conn net.Conn) {
 	var date string
 	for {
 		now := time.Now()
-		// Renew the socket deadline in batches to avoid timer churn during
-		// bursts on an established connection.
+		// Renew in batches to avoid resetting socket timers on every request.
 		if deadline.Sub(now) < 15*time.Second {
 			deadline = now.Add(30 * time.Second)
 			_ = conn.SetDeadline(deadline)
@@ -222,7 +239,7 @@ func (s *httpListener) connection(conn net.Conn) {
 			_, _ = io.WriteString(conn, malformedHTTP)
 			return
 		}
-		if request.ProtoMajor != 1 || request.ProtoMinor > 1 || request.Host == "" && request.ProtoMinor == 1 {
+		if request.ProtoMajor != 1 || request.ProtoMinor > 1 || (request.Host == "" && request.ProtoMinor == 1) {
 			_, _ = io.WriteString(conn, malformedHTTP)
 			return
 		}
@@ -250,16 +267,12 @@ func (s *httpListener) connection(conn net.Conn) {
 		}
 		s.handler.ServeHTTP(&response, request)
 		if body != nil && !body.complete {
-			// An unread request body may precede a subsequent request on this
-			// socket. Close instead of speculatively consuming those bytes.
+			// Unread body bytes may precede the next request on this socket.
 			closeConn = true
 		}
 		if err := response.send(conn, request, closeConn, date, head); err != nil || closeConn {
 			return
 		}
-		clear(response.headers)
-		response.status = 0
-		response.data = nil
-		response.media = ""
+		response.reset()
 	}
 }

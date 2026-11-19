@@ -26,12 +26,15 @@ var mcpTools = []tool{
 var toolList = func() fields {
 	items := make([]fields, 0, len(mcpTools))
 	for _, t := range mcpTools {
-		properties := fields{}
+		properties := make(fields, len(t.fields))
 		for key, kind := range t.fields {
 			properties[key] = fields{"type": kind}
 		}
-		items = append(items, fields{"name": t.name, "description": t.description,
-			"inputSchema": fields{"type": "object", "properties": properties, "required": t.required}})
+		items = append(items, fields{
+			"name":        t.name,
+			"description": t.description,
+			"inputSchema": fields{"type": "object", "properties": properties, "required": t.required},
+		})
 	}
 	return fields{"tools": items}
 }()
@@ -82,7 +85,26 @@ func (f *forge) runTool(name string, args fields) (result fields) {
 	if err != nil {
 		panic(err)
 	}
-	return fields{"content": []fields{{"type": "text", "text": string(display)}}, "structuredContent": json.RawMessage(display)}
+	return fields{
+		"content":           []fields{{"type": "text", "text": string(display)}},
+		"structuredContent": json.RawMessage(display),
+	}
+}
+
+func validToolArgument(kind string, value any) bool {
+	switch kind {
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "integer":
+		number, ok := value.(float64)
+		return ok && float64(int(number)) == number
+	default:
+		return false
+	}
 }
 
 func (f *forge) mcp(w http.ResponseWriter, req *http.Request) {
@@ -109,12 +131,19 @@ func (f *forge) mcp(w http.ResponseWriter, req *http.Request) {
 		sendBytes(w, 202, jsonMedia, nil)
 		return
 	}
-	send := func(result any) { sendJSON(w, 200, fields{"jsonrpc": "2.0", "id": id, "result": result}) }
-	reject := func(code int, message string) { sendJSON(w, 200, rpcError(id, code, message)) }
+	send := func(result any) {
+		sendJSON(w, 200, fields{"jsonrpc": "2.0", "id": id, "result": result})
+	}
+	reject := func(code int, message string) {
+		sendJSON(w, 200, rpcError(id, code, message))
+	}
 	switch method {
 	case "server/discover":
-		send(fields{"supportedVersions": []string{mcpRevision}, "capabilities": fields{"tools": fields{}},
-			"_meta": fields{"io.modelcontextprotocol/serverInfo": fields{"name": "makefun-forge", "version": "1.0.0"}}})
+		send(fields{
+			"supportedVersions": []string{mcpRevision},
+			"capabilities":      fields{"tools": fields{}},
+			"_meta":             fields{"io.modelcontextprotocol/serverInfo": fields{"name": "makefun-forge", "version": "1.0.0"}},
+		})
 	case "tools/list":
 		send(toolList)
 	case "tools/call":
@@ -143,21 +172,7 @@ func (f *forge) mcp(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		for _, key := range sortedKeys(t.fields) {
-			value, exists := args[key]
-			if !exists {
-				continue
-			}
-			valid := false
-			switch t.fields[key] {
-			case "string":
-				_, valid = value.(string)
-			case "boolean":
-				_, valid = value.(bool)
-			case "integer":
-				n, ok := value.(float64)
-				valid = ok && float64(int(n)) == n
-			}
-			if !valid {
+			if value, exists := args[key]; exists && !validToolArgument(t.fields[key], value) {
 				reject(-32602, "Invalid argument "+key)
 				return
 			}

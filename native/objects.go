@@ -10,6 +10,7 @@ import (
 )
 
 const zeroOID = "0000000000000000000000000000000000000000"
+
 const (
 	commitKind byte = 1
 	treeKind   byte = 2
@@ -26,6 +27,7 @@ type object struct {
 	parents []string
 	message string
 }
+
 type objectStore map[string]*object
 type treeEntry struct{ name, mode, sha string }
 type fileEntry struct{ mode, sha string }
@@ -44,26 +46,27 @@ func oid(value string) bool {
 }
 
 func newObject(kind byte, data []byte) *object {
-	o := &object{kind: kind, data: data}
+	obj := &object{kind: kind, data: data}
 	if kind != commitKind {
-		return o
+		return obj
 	}
 	header, message, ok := strings.Cut(string(data), "\n\n")
 	if !ok {
-		return o
+		return obj
 	}
 	first, rest, _ := strings.Cut(header, "\n")
-	if !strings.HasPrefix(first, "tree ") || !oid(first[5:]) {
-		return o
+	tree, hasTree := strings.CutPrefix(first, "tree ")
+	if !hasTree || !oid(tree) {
+		return obj
 	}
-	o.tree = first[5:]
-	o.message = strings.TrimSuffix(message, "\n")
+	obj.tree = tree
+	obj.message = strings.TrimSuffix(message, "\n")
 	for line := range strings.SplitSeq(rest, "\n") {
-		if strings.HasPrefix(line, "parent ") && oid(line[7:]) {
-			o.parents = append(o.parents, line[7:])
+		if parent, ok := strings.CutPrefix(line, "parent "); ok && oid(parent) {
+			obj.parents = append(obj.parents, parent)
 		}
 	}
-	return o
+	return obj
 }
 
 func objectID(kind byte, data []byte) string {
@@ -72,11 +75,11 @@ func objectID(kind byte, data []byte) string {
 	header = append(header, ' ')
 	header = strconv.AppendInt(header, int64(len(data)), 10)
 	header = append(header, 0)
-	h := sha1.New()
-	h.Write(header)
-	h.Write(data)
-	var digest [20]byte
-	return hex.EncodeToString(h.Sum(digest[:0]))
+	hash := sha1.New()
+	hash.Write(header)
+	hash.Write(data)
+	var digest [sha1.Size]byte
+	return hex.EncodeToString(hash.Sum(digest[:0]))
 }
 
 func (objects objectStore) save(kind byte, data []byte) string {
@@ -95,11 +98,16 @@ func (o *object) entries() []treeEntry {
 	for data := o.data; len(data) > 0; {
 		space := bytes.IndexByte(data, ' ')
 		nul := bytes.IndexByte(data, 0)
-		if space < 1 || nul <= space+1 || len(data) < nul+21 {
+		end := nul + 1 + sha1.Size
+		if space < 1 || nul <= space+1 || len(data) < end {
 			fail(400, "Invalid Git tree")
 		}
-		entries = append(entries, treeEntry{string(data[space+1 : nul]), string(data[:space]), hex.EncodeToString(data[nul+1 : nul+21])})
-		data = data[nul+21:]
+		entries = append(entries, treeEntry{
+			name: string(data[space+1 : nul]),
+			mode: string(data[:space]),
+			sha:  hex.EncodeToString(data[nul+1 : end]),
+		})
+		data = data[end:]
 	}
 	return entries
 }
@@ -131,16 +139,18 @@ func (objects objectStore) isAncestor(ancestor, tip string) bool {
 	pending := append([]string(nil), start.parents...)
 	seen := map[string]bool{}
 	for len(pending) > 0 {
-		sha := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
+		index := len(pending) - 1
+		sha := pending[index]
+		pending = pending[:index]
 		if sha == ancestor {
 			return true
 		}
-		if !seen[sha] {
-			seen[sha] = true
-			if o := objects[sha]; o != nil {
-				pending = append(pending, o.parents...)
-			}
+		if seen[sha] {
+			continue
+		}
+		seen[sha] = true
+		if obj := objects[sha]; obj != nil {
+			pending = append(pending, obj.parents...)
 		}
 	}
 	return false
@@ -153,16 +163,17 @@ func (objects objectStore) snapshot(tip string) map[string]fileEntry {
 		if depth > 128 {
 			fail(400, "Git tree is too deep")
 		}
-		for _, e := range objects[tree].entries() {
-			if e.mode == "40000" {
-				visit(e.sha, prefix+e.name+"/", depth+1)
+		for _, entry := range objects[tree].entries() {
+			path := prefix + entry.name
+			if entry.mode == "40000" {
+				visit(entry.sha, path+"/", depth+1)
 			} else {
-				files[prefix+e.name] = fileEntry{e.mode, e.sha}
+				files[path] = fileEntry{mode: entry.mode, sha: entry.sha}
 			}
 		}
 	}
-	if o := objects[tip]; o != nil && o.tree != "" {
-		visit(o.tree, "", 0)
+	if obj := objects[tip]; obj != nil && obj.tree != "" {
+		visit(obj.tree, "", 0)
 	}
 	return files
 }
@@ -172,7 +183,9 @@ func (objects objectStore) writeTree(files map[string]fileEntry) string {
 		files map[string]fileEntry
 		dirs  map[string]*directory
 	}
-	makeDir := func() *directory { return &directory{map[string]fileEntry{}, map[string]*directory{}} }
+	makeDir := func() *directory {
+		return &directory{files: map[string]fileEntry{}, dirs: map[string]*directory{}}
+	}
 	root := makeDir()
 	for path, entry := range files {
 		parent := root
@@ -192,7 +205,7 @@ func (objects objectStore) writeTree(files map[string]fileEntry) string {
 			entries[name] = entry
 		}
 		for name, child := range dir.dirs {
-			entries[name+"/"] = fileEntry{"40000", save(child)}
+			entries[name+"/"] = fileEntry{mode: "40000", sha: save(child)}
 		}
 		var data []byte
 		for _, name := range sortedKeys(entries) {
@@ -211,15 +224,15 @@ func (objects objectStore) writeTree(files map[string]fileEntry) string {
 
 func (r *repository) commit(files map[string]fileEntry, parent, message string) string {
 	tree := r.objects.writeTree(files)
-	var b strings.Builder
-	b.WriteString("tree " + tree + "\n")
+	var content strings.Builder
+	content.WriteString("tree " + tree + "\n")
 	if parent != "" {
-		b.WriteString("parent " + parent + "\n")
+		content.WriteString("parent " + parent + "\n")
 	}
 	login := r.info.Owner.Login
-	who := login + " <" + login + "@example.invalid> 1700000000 +0000\n"
-	b.WriteString("author " + who + "committer " + who + "\n" + message + "\n")
-	return r.objects.save(commitKind, []byte(b.String()))
+	identity := login + " <" + login + "@example.invalid> 1700000000 +0000\n"
+	content.WriteString("author " + identity + "committer " + identity + "\n" + message + "\n")
+	return r.objects.save(commitKind, []byte(content.String()))
 }
 
 func (r *repository) commits(tip string) []fields {
@@ -227,16 +240,17 @@ func (r *repository) commits(tip string) []fields {
 	seen := map[string]bool{}
 	items := []fields{}
 	for len(pending) > 0 {
-		sha := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		o := r.objects[sha]
-		if o == nil || o.tree == "" || seen[sha] {
+		index := len(pending) - 1
+		sha := pending[index]
+		pending = pending[:index]
+		obj := r.objects[sha]
+		if obj == nil || obj.tree == "" || seen[sha] {
 			continue
 		}
 		seen[sha] = true
-		items = append(items, fields{"sha": sha, "commit": fields{"message": o.message}})
-		for i := len(o.parents) - 1; i >= 0; i-- {
-			pending = append(pending, o.parents[i])
+		items = append(items, fields{"sha": sha, "commit": fields{"message": obj.message}})
+		for i := len(obj.parents) - 1; i >= 0; i-- {
+			pending = append(pending, obj.parents[i])
 		}
 	}
 	return items
@@ -255,11 +269,13 @@ func conflictPaths(files map[string]fileEntry) bool {
 
 func pullList(r *repository, state string) []*pull {
 	items := make([]*pull, 0, len(r.pulls))
-	for _, p := range r.pulls {
-		if state == "all" || state == p.State {
-			items = append(items, p)
+	for _, item := range r.pulls {
+		if state == "all" || state == item.State {
+			items = append(items, item)
 		}
 	}
-	sort.Slice(items, func(a, b int) bool { return items[a].Number > items[b].Number })
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Number > items[j].Number
+	})
 	return items
 }

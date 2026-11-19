@@ -15,6 +15,16 @@ Implement a complete forge that, in one Node 22 process with only the Node stand
 
 The official local loop is the kit's suite, not ad-hoc curl. After each phase, run the local runner and fix every failure in that phase before moving on.
 
+## How you must write the code (transcript gates)
+
+This entry is graded only after the session transcripts pass make.fun's transcript gates (RULES.txt, "## The transcript gate"). Work in this already-open Codex session in `C:\Users\Hieu\Desktop\forge\repo`. Write the forge yourself in this session.
+
+- **Write every application file through tool calls** (Write, Edit, apply_patch, or a heredoc that names the file). Code that appears only in your chat text or a fenced block does not count as a write. Do not ask the user to paste large amounts of forge code by hand: handwritten lines lower authored coverage. The transcripts must account for at least 30% of counted lines (authored or pasted), and the entrypoint `main.ts` must contain at least one line you authored (a line you wrote or edited in a tool call, not only a file you copied unchanged from the starter).
+- **Revise iteratively.** After you write a file, run the kit's local grader (`sdk/run.ts` or `grade-local --driver process`), then edit that file (or another file `main.ts` runs, such as `app.ts`) again so its **final** content comes from at least two assistant messages that write or edit it. A file written once in full and never revised counts as 1 and fails thinking_revised. Keep the lifecycle contract in `main.ts`, but do not leave `main.ts` as an untouched copy of the starter; edit it at least once (for example to import your modules or add the local-dev helper) and again after a grader run if needed.
+- **Take enough assistant turns.** Produce at least five assistant turns that include text or thinking, not only tool calls. Explain what you are changing when you edit.
+- **Do not invent or rewrite transcripts.** Do not create a `handed_over` session file, a reconstructed log, or a summary of this session. Codex already records rollouts. Leave packaging of the bundle and submission to the user.
+- **Do not start a nested agent run** that would become the build session, and do not tell the user to paste a hand-off from another chat as the opening prompt. This session is the build session.
+
 ## Layout and kit paths
 
 This build machine is Windows. You run terminal commands in **PowerShell** (not bash): use `$env:NAME = "value"`, `Set-Location`, `Join-Path`, `Copy-Item`. Do not use bash-only syntax (`export`, `chmod`, `curl` without `.exe`, `&&` on Windows PowerShell 5.1, `/tmp` as a host path, or `cp dir/{a,b}`).
@@ -65,7 +75,7 @@ Do not trust blog posts or GitHub.com quirks that the suite does not check. The 
 
 ## Lifecycle (keep `main.ts` as the starter has it)
 
-The starter already implements the lifecycle correctly. Prefer to keep `$KIT/starter/main.ts` and grow `app.ts` (and modules it imports). Do not change the contract:
+The starter already implements the lifecycle correctly. Keep that contract in `main.ts` and grow `app.ts` (and modules it imports). Copy the starter lifecycle as a starting point, then edit `main.ts` yourself in this session (at least one authored line; revise it or `app.ts` again after a local grader run). Do not change the contract:
 
 1. If `MAKEFUN_ENV_URL` is unset, exit 1 (trial always sets it).
 2. `createApp()`, then `server.listen(0)`. Never bind 8080.
@@ -191,7 +201,7 @@ Implications for the forge:
 
 ## Architecture (recommended)
 
-Keep `main.ts` as the lifecycle. Grow the server:
+Keep `main.ts` as the lifecycle entrypoint (edit it yourself; do not leave it as an untouched starter copy). Grow the server:
 
 - `app.ts` — HTTP router and header helpers (`Content-Type`, `X-GitHub-Request-Id`, 401/404/400/422)
 - `auth.ts` — bearer token, current login, 401/404 ownership
@@ -265,7 +275,7 @@ Do not submit, register, or sign in unless the user explicitly asks.
 
 Work one phase at a time. After each phase, run `sdk/run.ts` and do not move on until that phase's checks pass.
 
-0. **Bootstrap.** Copy the starter into this repo if it is not already here. Keep `main.ts`. Add `local-run.ts`. Confirm `node -v` is major 22. Confirm `GET /healthz` and the three starter passes still work.
+0. **Bootstrap.** Copy the starter into this repo if it is not already here. Then edit `main.ts` yourself (keep the lifecycle contract; add a hook to your modules or the local-dev helper so it is not an untouched copy). Add `local-run.ts` with a tool call. Confirm `node -v` is major 22. Confirm `GET /healthz` and the three starter passes still work. After that first grader run, edit `main.ts` or `app.ts` again so at least one of those files is written in two assistant tool-call turns.
 1. **Protocol + repo root.** `GET /api/v3/meta`, `GET /api/v3/user`, `POST /api/v3/user/repos`, request-id on every REST reply, 400 on malformed JSON, 401 without a token, 404 JSON with a string `message`. Target: protocol group (5) and early repos checks.
 2. **REST repos and contents.** List/patch/delete, pagination (`Link: rel="next"`), foreign-owner 404, `git/refs`, branches, commits, contents create/update/stale-sha/delete/directory listing. Contents must write real git objects.
 3. **Git smart HTTP.** Advertise v2 / receive-pack v0, 404 missing repo, ls-refs, first push, clone hashes/bytes, fetch, shallow/deepen, ff / non-ff / mixed report, branch and tag delete, 100-file push, pack integrity, sideband. Read failures from `sdk/run.ts` and fix against `checks-git.ts`.
@@ -274,7 +284,7 @@ Work one phase at a time. After each phase, run `sdk/run.ts` and do not move on 
 6. **GraphQL.** Introspection, viewer, repository, issues order/filter/pagination, mutations with REST parity, batched operations, errors, node ids. Check `$KIT/program/env/src/checks-graphql.ts` and `graphql-client.ts` for the exact documents.
 7. **MCP.** initialize / discover / tools/list (byte-identical), schemas, all six tools, errors, concurrency, auth, REST parity. Check `checks-mcp.ts` and `mcp-client.ts`.
 8. **Performance and determinism.** Run `sdk/run.ts --perf`. Keep HTTP connections alive, serve issue GET from memory, make receive-pack and shallow clone fast. Then `grade-local --kit . --bot $REPO --driver process --worktree` (docker only if Docker Desktop is running) and a replay. Compare scores to T_ref. Tune until checks stay at 120/120 and workloads approach or beat T_ref.
-9. **Stop for packaging.** Leave LICENSE, README template, and About to the user unless asked. Do not invent transcripts. Do not rewrite session logs.
+9. **Stop for packaging.** Leave LICENSE, README template, and About to the user unless asked. Do not invent transcripts, do not write a `handed_over` file, and do not rewrite session logs.
 
 When a check fails, read its `detail` and the corresponding function in the checks file. Fix the store or the wire, then re-run the suite. Do not disable a check or hard-code a scenario name unless the protocol truly requires that shape for all inputs — names come from a seed and will differ on the final instances.
 

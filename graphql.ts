@@ -302,8 +302,8 @@ function mutation(store: Store) {
     const { repo, item } = lookupId(store, name === 'closeIssue' ? input.issueId : input.subjectId, 'Issue') ?? missing();
     const issue = repo.issues.get(item) ?? missing();
     if (name === 'closeIssue') {
-      issue.state = 'closed';
-      return view('IssuePayload', { issue: issueView(repo, issue) });
+      const closed = store.updateIssue(repo, issue.number, { state: 'closed' });
+      return view('IssuePayload', { issue: issueView(repo, closed) });
     }
     const comment = store.addComment(repo, issue, input.body);
     const node = view('IssueComment', { id: globalId('IssueComment', repo.info.id, comment.id), body: comment.body });

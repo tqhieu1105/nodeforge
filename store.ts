@@ -2,14 +2,14 @@ import type { Objects } from './git/objects.ts';
 import { HttpError, missing } from './http.ts';
 
 export type Label = { name: string; color: string };
-export type Issue = {
+export type Issue = Readonly<{
   id: number;
   number: number;
   title: string;
   body: string;
   state: 'open' | 'closed';
   labels: Label[];
-};
+}>;
 export type Comment = { id: number; body: string };
 export type Pull = {
   id: number;
@@ -34,9 +34,29 @@ export type Repository = {
   full_name: string;
 };
 
+class Refs extends Map<string, string> {
+  revision = 0;
+
+  override set(ref: string, sha: string) {
+    if (this.get(ref) !== sha) this.revision++;
+    return super.set(ref, sha);
+  }
+
+  override delete(ref: string) {
+    const removed = super.delete(ref);
+    if (removed) this.revision++;
+    return removed;
+  }
+
+  override clear() {
+    if (this.size) this.revision++;
+    super.clear();
+  }
+}
+
 export type Repo = {
   info: Repository;
-  refs: Map<string, string>;
+  refs: Refs;
   objects: Objects;
   labels: Map<string, Label>;
   issues: Map<number, Issue>;
@@ -47,11 +67,13 @@ export type Repo = {
 
 export class Store {
   readonly viewer: { login: string };
+  private readonly loginKey: string;
   readonly repos = new Map<string, Repo>();
   nextId = 1;
 
   constructor(login: string) {
     this.viewer = { login };
+    this.loginKey = login.toLowerCase();
   }
 
   createRepo(input: Record<string, unknown>): Repo {
@@ -71,7 +93,7 @@ export class Store {
         owner: this.viewer,
         full_name: this.viewer.login + '/' + name,
       },
-      refs: new Map(),
+      refs: new Refs(),
       objects: new Map(),
       labels: new Map(),
       issues: new Map(),
@@ -84,7 +106,7 @@ export class Store {
   }
 
   findRepo(owner: string, name: string): Repo | undefined {
-    return owner.toLowerCase() === this.viewer.login.toLowerCase() ? this.repos.get(name.toLowerCase()) : undefined;
+    return owner.toLowerCase() === this.loginKey ? this.repos.get(name.toLowerCase()) : undefined;
   }
 
   requireRepo(owner: string, name: string): Repo {
@@ -105,6 +127,19 @@ export class Store {
       body: typeof input.body === 'string' ? input.body : '', state: 'open', labels: resolved,
     };
     repo.issues.set(issue.number, issue);
+    return issue;
+  }
+
+  updateIssue(repo: Repo, number: number, input: Record<string, unknown>): Issue {
+    const current = repo.issues.get(number) ?? missing();
+    const { state, title, body } = input;
+    const issue: Issue = {
+      ...current,
+      state: state === 'open' || state === 'closed' ? state : current.state,
+      title: typeof title === 'string' ? title : current.title,
+      body: typeof body === 'string' ? body : current.body,
+    };
+    repo.issues.set(number, issue);
     return issue;
   }
 

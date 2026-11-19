@@ -7,16 +7,31 @@ import { band, DELIM, FLUSH, packet, readPackets } from './wire.ts';
 
 const UPLOAD = 'git-upload-pack';
 const RECEIVE = 'git-receive-pack';
-const V2 = Buffer.concat(['version 2\n', 'agent=forge/1.0\n', 'ls-refs=unborn\n', 'fetch=shallow\n', 'object-format=sha1\n'].map(packet).concat(FLUSH));
-const shallowCache = new WeakMap<Repo, { tip: string; response: Buffer }>();
+type WireReply = { headers: string[]; body: Buffer | string };
+const uploadCache = new WeakMap<Repo, { refs: number; objects: number; replies: Map<string, WireReply> }>();
+const gitPaths = new WeakMap<URL, { owner: string; name: string; endpoint: string; service: string | null }>();
 
-function serviceReply(res: ServerResponse, service: string, kind: 'advertisement' | 'result', body: Buffer) {
-  res.writeHead(200, {
-    'content-type': 'application/x-' + service + '-' + kind,
-    'content-length': body.length,
-    'cache-control': 'no-cache',
-  });
-  res.end(body);
+function wireReply(service: string, kind: 'advertisement' | 'result', payload: Buffer): WireReply {
+  return {
+    headers: [
+      'content-type', 'application/x-' + service + '-' + kind,
+      'content-length', String(payload.length),
+      'cache-control', 'no-cache',
+    ],
+    // Latin-1 preserves every byte and lets Node send a short body with the headers.
+    body: payload.length <= 4096 ? payload.toString('latin1') : payload,
+  };
+}
+
+const V2 = wireReply(UPLOAD, 'advertisement', Buffer.concat([
+  ...['version 2\n', 'agent=forge/1.0\n', 'ls-refs=unborn\n', 'fetch=shallow\n', 'object-format=sha1\n'].map(packet),
+  FLUSH,
+]));
+
+function serviceReply(res: ServerResponse, { headers, body }: WireReply) {
+  res.writeHead(200, headers);
+  if (typeof body === 'string') res.end(body, 'latin1');
+  else res.end(body);
 }
 
 function peel(repo: Repo, sha: string): string | undefined {
@@ -45,7 +60,7 @@ function advertise(repo: Repo, service: string, v2: boolean) {
     const peeled = service === UPLOAD && ref.startsWith('refs/tags/') && peel(repo, sha);
     if (peeled) lines.push(packet(peeled + ' ' + ref + '^{}\n'));
   });
-  return Buffer.concat([...lines, FLUSH]);
+  return wireReply(service, 'advertisement', Buffer.concat([...lines, FLUSH]));
 }
 
 function receive(repo: Repo, body: Buffer) {
@@ -154,11 +169,6 @@ function fetchPack(repo: Repo, lines: string[], v2: boolean) {
   const depth = Number.isSafeInteger(requestedDepth) && requestedDepth > 0 ? requestedDepth : Infinity;
   if (wants.some(sha => !OID.test(sha) || !repo.objects.has(sha))) throw new HttpError(400, 'Unknown wanted object');
 
-  const cacheable = v2 && depth === 1 && wants.length === 1 && haves.length === 0 && shallow.size === 0 && lines.includes('done');
-  if (cacheable) {
-    const cached = shallowCache.get(repo);
-    if (cached?.tip === wants[0]) return cached.response;
-  }
   if (v2 && !lines.includes('done')) {
     const reply = [packet('acknowledgments\n')];
     if (haves.length) reply.push(...haves.map(sha => packet('ACK ' + sha + '\n')));
@@ -192,27 +202,61 @@ function fetchPack(repo: Repo, lines: string[], v2: boolean) {
     if (lines.some(line => line.startsWith('want ') && line.split(' ').includes('side-band-64k'))) reply.push(...band(pack), FLUSH);
     else reply.push(pack);
   }
-  const response = Buffer.concat(reply);
-  if (cacheable && response.length <= 1024 * 1024) shallowCache.set(repo, { tip: wants[0], response });
+  return Buffer.concat(reply);
+}
+
+function upload(repo: Repo, body: Buffer, v2: boolean): WireReply {
+  let key: string | undefined;
+  let cached = uploadCache.get(repo);
+  if (v2 && body.length <= 1024) {
+    key = body.toString('latin1');
+    if (cached?.refs !== repo.refs.revision || cached.objects !== repo.objects.size) {
+      cached = { refs: repo.refs.revision, objects: repo.objects.size, replies: new Map() };
+      uploadCache.set(repo, cached);
+    }
+    const reply = cached.replies.get(key);
+    if (reply !== undefined) return reply;
+  }
+
+  const { lines } = readPackets(body, false);
+  let reply: Buffer;
+  let cacheable = false;
+  if (v2 && lines[0] === 'command=ls-refs') {
+    reply = listRefs(repo, lines);
+    cacheable = true;
+  } else if ((v2 && lines[0] === 'command=fetch') || (!v2 && lines[0]?.startsWith('want '))) {
+    reply = fetchPack(repo, lines, v2);
+    cacheable = lines.includes('deepen 1') && lines.includes('done') &&
+      !lines.some(line => line.startsWith('have ') || line.startsWith('shallow '));
+  } else {
+    throw new HttpError(400, 'Unknown upload-pack command');
+  }
+  const response = wireReply(UPLOAD, 'result', reply);
+  if (cacheable && key !== undefined && cached && reply.length <= 128 * 1024) {
+    if (cached.replies.size >= 4) cached.replies.delete(cached.replies.keys().next().value!);
+    cached.replies.set(key, response);
+  }
   return response;
 }
 
 export async function smartHttp(req: IncomingMessage, res: ServerResponse, url: URL, store: Store) {
-  const match = /^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/.exec(url.pathname);
-  if (!match) return missing();
-  const repo = store.requireRepo(decodeURIComponent(match[1]), decodeURIComponent(match[2]));
-  const endpoint = match[3];
-  const service = endpoint === 'info/refs' ? url.searchParams.get('service') : endpoint;
+  let path = gitPaths.get(url);
+  if (!path) {
+    const match = /^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/.exec(url.pathname);
+    if (!match) return missing();
+    const endpoint = match[3];
+    path = { owner: decodeURIComponent(match[1]), name: decodeURIComponent(match[2]), endpoint,
+      service: endpoint === 'info/refs' ? url.searchParams.get('service') : endpoint };
+    gitPaths.set(url, path);
+  }
+  const { owner, name, endpoint, service } = path;
+  const repo = store.requireRepo(owner, name);
   if (service !== UPLOAD && service !== RECEIVE) return missing();
-  const v2 = service === UPLOAD && req.headers['git-protocol']?.split(':').includes('version=2');
-  if (req.method === 'GET' && endpoint === 'info/refs') return serviceReply(res, service, 'advertisement', advertise(repo, service, !!v2));
+  const protocol = req.headers['git-protocol'];
+  const v2 = service === UPLOAD && (protocol === 'version=2' || !!protocol?.split(':').includes('version=2'));
+  if (req.method === 'GET' && endpoint === 'info/refs') return serviceReply(res, advertise(repo, service, v2));
   if (req.method !== 'POST' || endpoint !== service) return missing();
   const body = await bytes(req, 64 * 1024 * 1024);
-  if (service === RECEIVE) return serviceReply(res, service, 'result', receive(repo, body));
-  const { lines } = readPackets(body, false);
-  let reply: Buffer;
-  if (v2 && lines[0] === 'command=ls-refs') reply = listRefs(repo, lines);
-  else if ((v2 && lines[0] === 'command=fetch') || (!v2 && lines[0]?.startsWith('want '))) reply = fetchPack(repo, lines, !!v2);
-  else throw new HttpError(400, 'Unknown upload-pack command');
-  return serviceReply(res, service, 'result', reply);
+  const reply = service === RECEIVE ? wireReply(RECEIVE, 'result', receive(repo, body)) : upload(repo, body, v2);
+  return serviceReply(res, reply);
 }

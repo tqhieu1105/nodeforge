@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto';
+import { hash } from 'node:crypto';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { objectId, type GitObject, type Kind, type Objects } from './objects.ts';
 
 const kinds: (Kind | undefined)[] = [undefined, 'commit', 'tree', 'blob', 'tag'];
-const digest = (data: Buffer) => createHash('sha1').update(data).digest();
+const digest = (data: Buffer) => hash('sha1', data, 'buffer');
 const MAX_OBJECT = 32 * 1024 * 1024;
 
 class Reader {
@@ -113,7 +113,7 @@ export function unpack(pack: Buffer, existing: Objects): Objects {
     }
 
     const stream = inflateSync(data.subarray(input.offset), {
-      info: true, chunkSize: 4096, maxOutputLength: Math.max(1, size),
+      info: true, chunkSize: Math.max(64, Math.min(16384, size + 1)), maxOutputLength: Math.max(1, size),
     }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
     input.offset += stream.engine.bytesWritten;
     if (stream.buffer.length !== size) throw new Error('Pack object size mismatch');

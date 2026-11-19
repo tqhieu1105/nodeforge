@@ -9,22 +9,36 @@ export class HttpError extends Error {
 }
 
 export function json(res: ServerResponse, status: number, data?: unknown, headers?: Record<string, string>): void {
-  const body = data === undefined ? undefined : JSON.stringify(data);
+  jsonText(res, status, data === undefined ? undefined : JSON.stringify(data), headers);
+}
+
+export function jsonText(res: ServerResponse, status: number, body?: string, headers?: Record<string, string>): void {
+  res.statusCode = status;
   res.setHeader('content-type', 'application/json; charset=utf-8');
-  if (body !== undefined) res.setHeader('content-length', Buffer.byteLength(body));
-  res.writeHead(status, headers);
+  if (headers) {
+    for (const name in headers) res.setHeader(name, headers[name]);
+  }
   res.end(body);
 }
 
-export async function bytes(req: IncomingMessage, limit: number): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let length = 0;
-  for await (const chunk of req) {
-    length += chunk.length;
-    if (length <= limit) chunks.push(chunk);
-  }
-  if (length > limit) throw new HttpError(400, 'Request body is too large');
-  return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, length);
+export function bytes(req: IncomingMessage, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let first: Buffer | undefined;
+    let chunks: Buffer[] | undefined;
+    let length = 0;
+    req.once('error', reject);
+    req.once('end', () => {
+      if (length > limit) reject(new HttpError(400, 'Request body is too large'));
+      else if (chunks) resolve(Buffer.concat(chunks, length));
+      else resolve(first ?? Buffer.alloc(0));
+    });
+    req.on('data', (chunk: Buffer) => {
+      length += chunk.length;
+      if (length > limit) return;
+      if (!first) first = chunk;
+      else (chunks ??= [first]).push(chunk);
+    });
+  });
 }
 
 export async function readJson(req: IncomingMessage): Promise<unknown> {

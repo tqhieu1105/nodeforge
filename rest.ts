@@ -1,15 +1,31 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { headRef, OID, readCommit, readTree, saveCommit, saveObject, snapshot } from './git/objects.ts';
-import { HttpError, json, missing, readJson, record } from './http.ts';
+import { HttpError, json, jsonText, missing, readJson, record } from './http.ts';
 import { createPull, listPulls, mergePull, pullFiles } from './pulls.ts';
-import { listIssues, type Repo, type Store } from './store.ts';
+import { listIssues, type Issue, type Repo, type Store } from './store.ts';
+
+const pathParts = new WeakMap<URL, string[]>();
+const issueJson = new WeakMap<Repo, { issue: Issue; body: string }>();
+
+function sendIssue(res: ServerResponse, repo: Repo, issue: Issue) {
+  let cached = issueJson.get(repo);
+  if (cached?.issue !== issue) {
+    cached = { issue, body: JSON.stringify(issue) };
+    issueJson.set(repo, cached);
+  }
+  return jsonText(res, 200, cached.body);
+}
 
 async function input(req: IncomingMessage) {
   return record(await readJson(req));
 }
 
 export async function rest(req: IncomingMessage, res: ServerResponse, url: URL, store: Store) {
-  const parts = url.pathname.slice('/api/v3/'.length).split('/').map(decodeURIComponent);
+  let parts = pathParts.get(url);
+  if (!parts) {
+    parts = url.pathname.slice('/api/v3/'.length).split('/').map(decodeURIComponent);
+    pathParts.set(url, parts);
+  }
   const method = req.method;
   if (url.pathname === '/api/v3' || url.pathname === '/api/v3/') {
     if (method === 'GET') {
@@ -70,7 +86,7 @@ export async function rest(req: IncomingMessage, res: ServerResponse, url: URL, 
   }
   if (parts[3] === 'issues') {
     if (parts.length === 4) {
-      if (method === 'POST') return json(res, 201, store.createIssue(repo, await input(req)));
+      if (method === 'POST') return json(res, 201, store.createIssue(repo, record(await readJson(req))));
       if (method === 'GET') {
         const { searchParams } = url;
         const issues = listIssues(repo, searchParams.get('state') || 'open', searchParams.get('direction') === 'asc');
@@ -79,13 +95,10 @@ export async function rest(req: IncomingMessage, res: ServerResponse, url: URL, 
     } else {
       const issue = repo.issues.get(Number(parts[4])) ?? missing();
       if (parts.length === 5) {
-        if (method === 'GET') return json(res, 200, issue);
+        if (method === 'GET') return sendIssue(res, repo, issue);
         if (method === 'PATCH') {
-          const { state, title, body } = await input(req);
-          if (state === 'open' || state === 'closed') issue.state = state;
-          if (typeof title === 'string') issue.title = title;
-          if (typeof body === 'string') issue.body = body;
-          return json(res, 200, issue);
+          const patch = await input(req);
+          return json(res, 200, store.updateIssue(repo, issue.number, patch));
         }
       }
       if (parts.length === 6 && parts[5] === 'comments') {

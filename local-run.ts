@@ -1,8 +1,4 @@
-import { createApp } from './app.ts';
+import { fileURLToPath } from 'node:url';
 
-const server = createApp();
-server.listen(0, '127.0.0.1', () => {
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('Expected a TCP port');
-  process.stdout.write(`${address.port}\n`);
-});
+const binary = fileURLToPath(new URL('./native/forge-linux-amd64', import.meta.url));
+process.execve!(binary, [binary, '--local'], process.env);

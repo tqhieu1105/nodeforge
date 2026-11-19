@@ -1,5 +1,10 @@
 # AGENTS.md — github-core-clone-01
 
+The forge now runs from the static Linux amd64 binary built by `sh native/build.sh`. Both Node
+launchers replace themselves with that executable. The Go server implements the lifecycle and all
+four surfaces with one in-memory store. The TypeScript layout and build phases below describe the
+original implementation. Continue to use the kit commands below to grade the entry.
+
 You are building a standalone, GitHub-compatible git forge for the make.fun bounty **github-core-clone-01**. The grader runs this repository's entrypoint as one process and scores the HTTP server it starts. Work only from the official kit and from this file. Do not invent endpoints, status codes, or scoring rules.
 
 This file will be uploaded with the transcript bundle. Keep it accurate. Do not put secrets, API keys, or personal details in it.

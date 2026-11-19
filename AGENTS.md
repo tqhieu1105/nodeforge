@@ -17,7 +17,7 @@ The official local loop is the kit's suite, not ad-hoc curl. After each phase, r
 
 ## How you must write the code (transcript gates)
 
-This entry is graded only after the session transcripts pass make.fun's transcript gates (RULES.txt, "## The transcript gate"). Work in this already-open Codex session in `C:\Users\Hieu\Desktop\forge\repo`. Write the forge yourself in this session.
+This entry is graded only after the session transcripts pass make.fun's transcript gates (RULES.txt, "## The transcript gate"). Work in this already-open Codex session in `/workspace/makefun/repo`. Write the forge yourself in this session.
 
 - **Write every application file through tool calls** (Write, Edit, apply_patch, or a heredoc that names the file). Code that appears only in your chat text or a fenced block does not count as a write. Do not ask the user to paste large amounts of forge code by hand: handwritten lines lower authored coverage. The transcripts must account for at least 30% of counted lines (authored or pasted), and the entrypoint `main.ts` must contain at least one line you authored (a line you wrote or edited in a tool call, not only a file you copied unchanged from the starter).
 - **Revise iteratively.** After you write a file, run the kit's local grader (`sdk/run.ts` or `grade-local --driver process`), then edit that file (or another file `main.ts` runs, such as `app.ts`) again so its **final** content comes from at least two assistant messages that write or edit it. A file written once in full and never revised counts as 1 and fails thinking_revised. Keep the lifecycle contract in `main.ts`, but do not leave `main.ts` as an untouched copy of the starter; edit it at least once (for example to import your modules or add the local-dev helper) and again after a grader run if needed.
@@ -27,46 +27,45 @@ This entry is graded only after the session transcripts pass make.fun's transcri
 
 ## Layout and kit paths
 
-This build machine is Windows. You run terminal commands in **PowerShell** (not bash): use `$env:NAME = "value"`, `Set-Location`, `Join-Path`, `Copy-Item`. Do not use bash-only syntax (`export`, `chmod`, `curl` without `.exe`, `&&` on Windows PowerShell 5.1, `/tmp` as a host path, or `cp dir/{a,b}`).
+This build machine is **Linux**. You run terminal commands in **bash**. Set these in each new terminal, and keep Node 22 first on `PATH` (the box default `node` is not the grader runtime):
 
-The forge you write is graded on **Linux** (`node /bot/main.ts` in the trial pod). Keep application code platform-neutral: `node:path` / `path.join`, `os.tmpdir()` for scratch (that is `/tmp` on the grader, and the user temp dir when testing on Windows), forward slashes in git tree paths, no `child_process` shell, and no `git` binary. Never hard-code `C:\` or assume a drive letter in the forge.
-
-The official grader is Node 22. This machine currently has v24.20.0; switch to Node 22 (`winget install OpenJS.NodeJS.22` or `nvm install 22; nvm use 22`) and confirm `node -v` before grading.
-
-Treat these as variables (PowerShell; set them in each new terminal):
-
-```powershell
-$KIT  = "C:\Users\Hieu\Desktop\forge\github-core-clone-01-kit"
-$REPO = "C:\Users\Hieu\Desktop\forge\repo"
+```bash
+export PATH=/workspace/makefun/node22/bin:$PATH
+KIT=/workspace/makefun/github-core-clone-01-kit
+REPO=/workspace/makefun/repo
 ```
+
+Confirm `node -v` starts with `v22` after the `PATH` export before you grade or run the suite.
+
+The forge you write is graded on **Linux** (`node /bot/main.ts` in the trial pod). Keep application code platform-neutral: `node:path` / `path.join`, `os.tmpdir()` for scratch (that is `/tmp` on this box and on the grader), forward slashes in git tree paths, no `child_process` shell, and no `git` binary. Never hard-code `C:\` or assume a drive letter in the forge.
 
 - `$KIT` — unpacked kit (`github-core-clone-01-kit`)
 - `$REPO` — this repository (the entry)
 
 Authoritative sources, in this order:
 
-1. `$KIT\RULES.txt`
-2. `$KIT\program\env\src\` (and the byte-identical copies under `$KIT\sdk\conformance\`)
-3. This file and `$KIT\starter\`
+1. `$KIT/RULES.txt`
+2. `$KIT/program/env/src/` (and the byte-identical copies under `$KIT/sdk/conformance/`)
+3. This file and `$KIT/starter/`
 
 Do not trust blog posts or GitHub.com quirks that the suite does not check. The exact checks, titles, timeouts, and required replies are in:
 
-- `$KIT\program\env\src\manifest.ts` — groups, scoring, T_ref
-- `$KIT\program\env\src\checks-git.ts` — 30 git checks
-- `$KIT\program\env\src\checks-rest.ts` — repos (15), issues (15), pulls (20), protocol (5)
-- `$KIT\program\env\src\checks-graphql.ts` — 20 GraphQL checks
-- `$KIT\program\env\src\checks-mcp.ts` — 15 MCP checks
-- `$KIT\program\env\src\wire.ts` — scenario seed, tokens, budgets
-- `$KIT\program\env\src\bench.ts` — four timed workloads
-- `$KIT\program\env\src\calibration.json` — house T_ref medians
-- `$KIT\starter\main.ts` and `app.ts` — lifecycle and starting surface
+- `$KIT/program/env/src/manifest.ts` — groups, scoring, T_ref
+- `$KIT/program/env/src/checks-git.ts` — 30 git checks
+- `$KIT/program/env/src/checks-rest.ts` — repos (15), issues (15), pulls (20), protocol (5)
+- `$KIT/program/env/src/checks-graphql.ts` — 20 GraphQL checks
+- `$KIT/program/env/src/checks-mcp.ts` — 15 MCP checks
+- `$KIT/program/env/src/wire.ts` — scenario seed, tokens, budgets
+- `$KIT/program/env/src/bench.ts` — four timed workloads
+- `$KIT/program/env/src/calibration.json` — house T_ref medians
+- `$KIT/starter/main.ts` and `app.ts` — lifecycle and starting surface
 
 ## Hard constraints (the trial pod)
 
 - Entrypoint: `main.ts` at the repository root. The grader runs `node /bot/main.ts` on Node 22.18+ (TypeScript types are stripped by Node; no compile step). A `main.py` (Python 3.13) entry is also legal, but this repo is Node.
 - Standard library only at runtime. No `npm install`, no native addons, no package manager, no internet. Node built-ins such as `node:http`, `node:zlib`, `node:crypto`, `node:fs`, `node:path`, `node:buffer`, `node:stream` are allowed. A statically linked Linux amd64 binary you commit is allowed and counts toward size caps.
 - No `git` binary exists in the pod. Implement packfiles, objects, pkt-line, sideband, and zlib yourself.
-- `/bot` (this repo at the submitted commit, on the Linux grader) is **read-only**. Write only under `/tmp` in the trial. In code, use `os.tmpdir()` from `node:os` so local Windows runs write to the user temp directory and the grader still writes to `/tmp`.
+- `/bot` (this repo at the submitted commit, on the Linux grader) is **read-only**. Write only under `/tmp` in the trial. In code, use `os.tmpdir()` from `node:os` (that is `/tmp` on this Linux box and on the grader).
 - Limits shared with the suite: 2 CPUs, 1024 MB memory, 256 processes, 900 s wall. Leave the suite room. A trial still running at 900 s scores 0 on every column.
 - Do not bind port 8080. The suite listens there. Use `listen(0)` and read `server.address().port`.
 - Size caps: at most 16 MiB for the whole tree (`max_tree_bytes: 16777216`) and 8 MiB for any one file.
@@ -215,59 +214,72 @@ Implement git objects correctly first: REST contents, pulls, merge, clone, and G
 
 ## Local commands
 
-Faster inner loop (you start the server yourself, no Docker, no models). Add a small `local-run.ts` that calls `createApp()`, listens (e.g. `listen(0)` or `process.env.PORT`), prints the port, and does not talk to `MAKEFUN_ENV_URL`. Use two PowerShell windows; set `$KIT` / `$REPO` in each.
+Faster inner loop (you start the server yourself, no Docker, no models). Add a small `local-run.ts` that calls `createApp()`, listens (e.g. `listen(0)` or `process.env.PORT`), prints the port, and does not talk to `MAKEFUN_ENV_URL`. Use two terminals; set `PATH`, `$KIT`, and `$REPO` in each.
 
 Window 1 (server; note the printed PORT):
 
-```powershell
-$REPO = "C:\Users\Hieu\Desktop\forge\repo"
-$env:MAKEFUN_SHOP_TOKEN = "devtoken"
-Set-Location $REPO
+```bash
+export PATH=/workspace/makefun/node22/bin:$PATH
+REPO=/workspace/makefun/repo
+export MAKEFUN_SHOP_TOKEN=devtoken
+cd "$REPO"
 node --experimental-strip-types local-run.ts
 ```
 
 Window 2 (suite; replace PORT with the number from window 1):
 
-```powershell
-$KIT = "C:\Users\Hieu\Desktop\forge\github-core-clone-01-kit"
-Set-Location $KIT
+```bash
+export PATH=/workspace/makefun/node22/bin:$PATH
+KIT=/workspace/makefun/github-core-clone-01-kit
+cd "$KIT"
 node --experimental-strip-types sdk/run.ts --url http://127.0.0.1:PORT --token devtoken --json
 ```
 
 After conformance is green, add `--perf` (one line):
 
-```powershell
-Set-Location $KIT
+```bash
+export PATH=/workspace/makefun/node22/bin:$PATH
+KIT=/workspace/makefun/github-core-clone-01-kit
+cd "$KIT"
 node --experimental-strip-types sdk/run.ts --url http://127.0.0.1:PORT --token devtoken --perf
 ```
 
-`--token` can be any non-empty string locally; use the same value the server treats as `MAKEFUN_SHOP_TOKEN` (`$env:MAKEFUN_SHOP_TOKEN` in the server process). Exit status of `sdk/run.ts` is 0 if `/healthz` answered, even when checks fail — read the table or JSON (`counts.passed`, `columns`). The starter, as shipped, scores feature 15 / agent 0 / perf 0 / working 1 (3/120: `repos.root`, `repos.not-found`, `protocol.unknown-route-json-404`).
+`--token` can be any non-empty string locally; use the same value the server treats as `MAKEFUN_SHOP_TOKEN` (`$MAKEFUN_SHOP_TOKEN` in the server process). Exit status of `sdk/run.ts` is 0 if `/healthz` answered, even when checks fail — read the table or JSON (`counts.passed`, `columns`). The starter, as shipped, scores feature 15 / agent 0 / perf 0 / working 1 (3/120: `repos.root`, `repos.not-found`, `protocol.unknown-route-json-404`).
 
-Official trial simulation (from `$KIT`). Always pass `--driver process` on this Windows machine (the CLI default is `docker`). Use `--driver docker` only if Docker Desktop is installed and running:
+Official trial simulation (from `$KIT`). This box has no Docker; the CLI default is `docker`, so always pass `--driver process`:
 
-```powershell
-Set-Location $KIT
-node cli/makefun.mjs grade-local --kit . --bot $REPO --driver process --worktree
+```bash
+export PATH=/workspace/makefun/node22/bin:$PATH
+KIT=/workspace/makefun/github-core-clone-01-kit
+REPO=/workspace/makefun/repo
+cd "$KIT"
+node cli/makefun.mjs grade-local --kit . --bot "$REPO" --driver process --worktree
 ```
 
 More practice trials, or a replay after a live cassette exists:
 
-```powershell
-Set-Location $KIT
-node cli/makefun.mjs grade-local --kit . --bot $REPO --driver process --instances 3
-node cli/makefun.mjs grade-local --kit . --bot $REPO --driver process --replay CASSETTE
+```bash
+export PATH=/workspace/makefun/node22/bin:$PATH
+KIT=/workspace/makefun/github-core-clone-01-kit
+REPO=/workspace/makefun/repo
+cd "$KIT"
+node cli/makefun.mjs grade-local --kit . --bot "$REPO" --driver process --instances 3
+node cli/makefun.mjs grade-local --kit . --bot "$REPO" --driver process --replay CASSETTE
 ```
 
-Prefer Node 22.18+ locally (the grader's runtime). This machine currently has Node v24.20.0; install Node 22 (`winget install OpenJS.NodeJS.22`, or nvm-windows `nvm install 22` then `nvm use 22`) and confirm `node -v` starts with `v22` before grading. Without `--worktree`, the committed HEAD is graded.
+Use the Node 22 already on `PATH` after the export above (the official grader runtime is Node 22.18+). Confirm `node -v` starts with `v22` before grading. Without `--worktree`, the committed HEAD is graded.
 
 After first meaningful edits, also run (from `$KIT`) once transcripts exist:
 
-```powershell
-Set-Location $KIT
-node cli/makefun.mjs bundle --repo $REPO --dry-run
+```bash
+export PATH=/workspace/makefun/node22/bin:$PATH
+KIT=/workspace/makefun/github-core-clone-01-kit
+REPO=/workspace/makefun/repo
+cd "$KIT"
+node cli/makefun.mjs bundle --repo "$REPO" --dry-run
 ```
 
-Codex session logs on this machine live under `$env:USERPROFILE\.codex\sessions` (and `archived_sessions`), files `rollout-*.jsonl` or `rollout-*.jsonl.zst`.
+Codex session logs on this machine live under `~/.codex/sessions` (and `archived_sessions`), files `rollout-*.jsonl` or `rollout-*.jsonl.zst`.
 
 Do not submit, register, or sign in unless the user explicitly asks.
 
@@ -283,7 +295,7 @@ Work one phase at a time. After each phase, run `sdk/run.ts` and do not move on 
 5. **REST pulls and merge.** Create, files list/shape, squash merge onto default branch, 404/405, list filters.
 6. **GraphQL.** Introspection, viewer, repository, issues order/filter/pagination, mutations with REST parity, batched operations, errors, node ids. Check `$KIT/program/env/src/checks-graphql.ts` and `graphql-client.ts` for the exact documents.
 7. **MCP.** initialize / discover / tools/list (byte-identical), schemas, all six tools, errors, concurrency, auth, REST parity. Check `checks-mcp.ts` and `mcp-client.ts`.
-8. **Performance and determinism.** Run `sdk/run.ts --perf`. Keep HTTP connections alive, serve issue GET from memory, make receive-pack and shallow clone fast. Then `grade-local --kit . --bot $REPO --driver process --worktree` (docker only if Docker Desktop is running) and a replay. Compare scores to T_ref. Tune until checks stay at 120/120 and workloads approach or beat T_ref.
+8. **Performance and determinism.** Run `sdk/run.ts --perf`. Keep HTTP connections alive, serve issue GET from memory, make receive-pack and shallow clone fast. Then `grade-local --kit . --bot $REPO --driver process --worktree` (always `--driver process`; Docker is not available on this box) and a replay. Compare scores to T_ref. Tune until checks stay at 120/120 and workloads approach or beat T_ref.
 9. **Stop for packaging.** Leave LICENSE, README template, and About to the user unless asked. Do not invent transcripts, do not write a `handed_over` file, and do not rewrite session logs.
 
 When a check fails, read its `detail` and the corresponding function in the checks file. Fix the store or the wire, then re-run the suite. Do not disable a check or hard-code a scenario name unless the protocol truly requires that shape for all inputs — names come from a seed and will differ on the final instances.
@@ -296,4 +308,4 @@ When a check fails, read its `detail` and the corresponding function in the chec
 - Avoid shared mutable request state. Support concurrent clone (50 at once) and two concurrent MCP calls.
 - Comment only where the suite contract is subtle (pkt-line, shallow, squash).
 - Platform-neutral forge code: `path.join`, `os.tmpdir()`, no hardcoded Windows or Unix paths, no shell, no `git` executable. Git object and tree paths use `/`.
-- Commands you run while developing are PowerShell, as in the Local commands section.
+- Commands you run while developing are bash, as in the Local commands section. Always prepend `/workspace/makefun/node22/bin` to `PATH` first.

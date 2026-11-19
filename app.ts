@@ -1,6 +1,8 @@
 import { createServer } from 'node:http';
 import { smartHttp } from './git/smart.ts';
+import { graphql } from './graphql.ts';
 import { HttpError, json, missing } from './http.ts';
+import { mcp } from './mcp.ts';
 import { rest } from './rest.ts';
 import { Store } from './store.ts';
 
@@ -19,6 +21,8 @@ export function createApp() {
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true });
       if (!authorization || req.headers.authorization !== authorization) throw new HttpError(401, 'Bad credentials');
       if (isRest) return await rest(req, res, url, store);
+      if (req.method === 'POST' && url.pathname === '/api/graphql') return await graphql(req, res, store);
+      if (req.method === 'POST' && url.pathname === '/mcp') return await mcp(req, res, store);
       if (url.pathname.includes('.git/')) return await smartHttp(req, res, url, store);
       return missing();
     } catch (error) {

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { headRef, OID, readCommit, readTree, saveCommit, saveObject, snapshot } from './git/objects.ts';
 import { HttpError, json, missing, readJson, record } from './http.ts';
+import { createPull, listPulls, mergePull, pullFiles } from './pulls.ts';
 import { listIssues, type Repo, type Store } from './store.ts';
 
 async function input(req: IncomingMessage) {
@@ -90,6 +91,20 @@ export async function rest(req: IncomingMessage, res: ServerResponse, url: URL, 
       if (parts.length === 6 && parts[5] === 'comments') {
         if (method === 'GET') return json(res, 200, repo.comments.get(issue.number) ?? []);
         if (method === 'POST') return json(res, 201, store.addComment(repo, issue, (await input(req)).body));
+      }
+    }
+  }
+  if (parts[3] === 'pulls') {
+    if (parts.length === 4) {
+      if (method === 'POST') return json(res, 201, createPull(store, repo, await input(req)));
+      if (method === 'GET') return json(res, 200, paginate(listPulls(repo, url.searchParams.get('state') || 'open'), url.searchParams));
+    } else {
+      const pull = repo.pulls.get(Number(parts[4])) ?? missing();
+      if (parts.length === 5 && method === 'GET') return json(res, 200, pull);
+      if (parts.length === 6 && parts[5] === 'files' && method === 'GET') return json(res, 200, pullFiles(repo, pull));
+      if (parts.length === 6 && parts[5] === 'merge' && method === 'PUT') {
+        const body = await input(req);
+        return json(res, 200, mergePull(repo, pull, body.merge_method));
       }
     }
   }

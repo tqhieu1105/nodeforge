@@ -11,6 +11,18 @@ export type Issue = {
   labels: Label[];
 };
 export type Comment = { id: number; body: string };
+export type Pull = {
+  id: number;
+  number: number;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  head: { ref: string; sha: string };
+  base: { ref: string; sha: string };
+  merged: boolean;
+  merged_at: string | null;
+  merge_commit_sha: string | null;
+};
 
 export type Repository = {
   id: number;
@@ -29,6 +41,7 @@ export type Repo = {
   labels: Map<string, Label>;
   issues: Map<number, Issue>;
   comments: Map<number, Comment[]>;
+  pulls: Map<number, Pull>;
   nextNumber: number;
 };
 
@@ -63,6 +76,7 @@ export class Store {
       labels: new Map(),
       issues: new Map(),
       comments: new Map(),
+      pulls: new Map(),
       nextNumber: 1,
     };
     this.repos.set(key, repo);

@@ -21,6 +21,8 @@ This build machine is Windows. You run terminal commands in **PowerShell** (not 
 
 The forge you write is graded on **Linux** (`node /bot/main.ts` in the trial pod). Keep application code platform-neutral: `node:path` / `path.join`, `os.tmpdir()` for scratch (that is `/tmp` on the grader, and the user temp dir when testing on Windows), forward slashes in git tree paths, no `child_process` shell, and no `git` binary. Never hard-code `C:\` or assume a drive letter in the forge.
 
+The official grader is Node 22. This machine currently has v24.20.0; switch to Node 22 (`winget install OpenJS.NodeJS.22` or `nvm install 22; nvm use 22`) and confirm `node -v` before grading.
+
 Treat these as variables (PowerShell; set them in each new terminal):
 
 ```powershell
@@ -246,7 +248,7 @@ node cli/makefun.mjs grade-local --kit . --bot $REPO --driver process --instance
 node cli/makefun.mjs grade-local --kit . --bot $REPO --driver process --replay CASSETTE
 ```
 
-Prefer Node 22.18+ locally (the grader's runtime). Without `--worktree`, the committed HEAD is graded.
+Prefer Node 22.18+ locally (the grader's runtime). This machine currently has Node v24.20.0; install Node 22 (`winget install OpenJS.NodeJS.22`, or nvm-windows `nvm install 22` then `nvm use 22`) and confirm `node -v` starts with `v22` before grading. Without `--worktree`, the committed HEAD is graded.
 
 After first meaningful edits, also run (from `$KIT`) once transcripts exist:
 

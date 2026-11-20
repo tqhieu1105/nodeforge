@@ -269,7 +269,7 @@ func (f *forge) issueRead(w http.ResponseWriter, owner, name string, number int)
 		// A parsed GET belongs to this connection and includes its authorization.
 		header := append(make([]byte, 0, 100), "HTTP/1.1 200 OK\r\nContent-Type: "+jsonMedia+"\r\nContent-Length: "...)
 		header = strconv.AppendInt(header, int64(len(item.wire)), 10)
-		header = append(header, "\r\nDate: "...)
+		header = append(header, "\r\n"...)
 		response.request.issue = issueReply{epoch: epoch, header: header, body: item.wire}
 	}
 	sendBytes(w, 200, jsonMedia, item.wire)

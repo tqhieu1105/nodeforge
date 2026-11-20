@@ -264,7 +264,7 @@ var framingHeaders = map[string]bool{
 	"Content-Type":   true,
 }
 
-func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool, date string, buffer []byte) error {
+func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool, buffer []byte) error {
 	status := w.status
 	if status == 0 {
 		status = 200
@@ -277,8 +277,6 @@ func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool
 	buffer = strconv.AppendInt(buffer, int64(status), 10)
 	buffer = append(buffer, ' ')
 	buffer = append(buffer, http.StatusText(status)...)
-	buffer = append(buffer, "\r\nDate: "...)
-	buffer = append(buffer, date...)
 	buffer = append(buffer, "\r\n"...)
 	bodyAllowed := status != 204 && status != 304
 	if bodyAllowed {
@@ -325,10 +323,9 @@ func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool
 	return err
 }
 
-func (reply issueReply) send(conn net.Conn, date string, id uint64, scratch []byte) error {
+func (reply issueReply) send(conn net.Conn, id uint64, scratch []byte) error {
 	packet := append(scratch[:0], reply.header...)
-	packet = append(packet, date...)
-	packet = append(packet, "\r\nX-GitHub-Request-Id: "...)
+	packet = append(packet, "X-GitHub-Request-Id: "...)
 	packet = strconv.AppendUint(packet, id, 16)
 	packet = append(packet, "\r\n\r\n"...)
 	if len(packet)+len(reply.body) <= cap(packet) {
@@ -357,8 +354,6 @@ func (s *httpListener) connection(conn net.Conn) {
 	forge, _ := s.handler.(*forge)
 	var body trackedBody
 	var deadline time.Time
-	var dateSecond int64
-	var date string
 	for {
 		now := time.Now()
 		// Renew in batches to avoid resetting socket timers on every request.
@@ -383,14 +378,10 @@ func (s *httpListener) connection(conn net.Conn) {
 			_, _ = io.WriteString(conn, malformedHTTP)
 			return
 		}
-		now = time.Now()
-		if now.Unix() != dateSecond {
-			dateSecond, date = now.Unix(), now.UTC().Format(http.TimeFormat)
-		}
 		if forge != nil && reader.current != nil {
 			reply := reader.current.issue
 			if reply.body != nil && reply.epoch == forge.issueEpoch.Load() {
-				if reply.send(conn, date, forge.requests.Add(1), head) != nil {
+				if reply.send(conn, forge.requests.Add(1), head) != nil {
 					return
 				}
 				continue
@@ -406,7 +397,7 @@ func (s *httpListener) connection(conn net.Conn) {
 		if expect := request.Header.Get("Expect"); expect != "" {
 			if !strings.EqualFold(expect, "100-continue") {
 				sendJSON(&response, 417, fields{"message": "Expectation Failed"})
-				_ = response.send(conn, request, true, date, head)
+				_ = response.send(conn, request, true, head)
 				return
 			}
 			if hasBody {
@@ -420,7 +411,7 @@ func (s *httpListener) connection(conn net.Conn) {
 			// Unread body bytes may precede the next request on this socket.
 			closeConn = true
 		}
-		if err := response.send(conn, request, closeConn, date, head); err != nil || closeConn {
+		if err := response.send(conn, request, closeConn, head); err != nil || closeConn {
 			return
 		}
 		response.reset()

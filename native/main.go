@@ -252,7 +252,7 @@ func run(local bool) error {
 		return errors.New("MAKEFUN_ENV_URL is not set")
 	}
 	// Keep a CPU available to the suite in its two-CPU trial.
-	runtime.GOMAXPROCS(1)
+	runtime.GOMAXPROCS(2)
 	debug.SetGCPercent(250)
 	debug.SetMemoryLimit(256 << 20)
 	address := ":0"

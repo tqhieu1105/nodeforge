@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,7 +64,23 @@ func requestBody(w http.ResponseWriter, r *http.Request, limit int64) []byte {
 		fail(400, "Invalid request body")
 	}
 	if size > 0 && size <= 16<<10 {
-		data := make([]byte, int(size))
+		if tracked, ok := r.Body.(*trackedBody); ok {
+			if body, ok := tracked.ReadCloser.(*fixedBody); ok {
+				if data := body.take(int(size)); data != nil {
+					tracked.complete = true
+					return data
+				}
+			}
+		}
+		var data []byte
+		if response, ok := w.(*wireResponse); ok && size <= 4096 {
+			if int(size) > cap(response.input) {
+				response.input = make([]byte, 0, 4096)
+			}
+			data = response.input[:size]
+		} else {
+			data = make([]byte, int(size))
+		}
 		if _, err := io.ReadFull(r.Body, data); err != nil {
 			fail(400, "Invalid request body")
 		}
@@ -119,6 +136,7 @@ type forge struct {
 	repoIDs       map[int]*repository
 	id            int
 	requests      atomic.Uint64
+	issueEpoch    atomic.Uint64
 }
 
 func newForge() *forge {
@@ -152,8 +170,12 @@ func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	isREST := path == "/api/v3" || strings.HasPrefix(path, "/api/v3/")
 	if isREST {
-		requestID := strconv.FormatUint(f.requests.Add(1), 16)
-		w.Header().Set("X-GitHub-Request-Id", requestID)
+		id := f.requests.Add(1)
+		if response, ok := w.(*wireResponse); ok {
+			response.id = id
+		} else {
+			w.Header().Set("X-GitHub-Request-Id", strconv.FormatUint(id, 16))
+		}
 	}
 	if path == "/healthz" && r.Method == "GET" {
 		sendBytes(w, 200, jsonMedia, []byte("{\"ok\":true}"))
@@ -231,6 +253,8 @@ func run(local bool) error {
 	}
 	// Keep a CPU available to the suite in its two-CPU trial.
 	runtime.GOMAXPROCS(1)
+	debug.SetGCPercent(250)
+	debug.SetMemoryLimit(256 << 20)
 	address := ":0"
 	if local {
 		address = "127.0.0.1:0"

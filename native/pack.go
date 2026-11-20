@@ -148,7 +148,36 @@ func inflate(p *bytes.Reader, n int) []byte {
 	return data[:n:n]
 }
 
-func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
+type packedObject struct {
+	id     string
+	object *object
+}
+
+func fullEntries(data []byte, count int, dst []packedObject) ([]packedObject, bool) {
+	reader := packReader{data: bytes.NewReader(data)}
+	expanded := 0
+	for range count {
+		first := reader.byte()
+		kind := first >> 4 & 7
+		if kind < commitKind || kind > tagKind {
+			// Fall through to delta resolution for all non-full entries.
+			return dst[:0], false
+		}
+		size := reader.size(int(first&15), 4, first&128 != 0)
+		expanded += size
+		if expanded > maxExpanded {
+			badPack()
+		}
+		raw := inflate(reader.data, size)
+		dst = append(dst, packedObject{id: objectID(kind, raw), object: newObject(kind, raw)})
+	}
+	if reader.data.Len() != 0 {
+		badPack()
+	}
+	return dst, true
+}
+
+func unpack(data []byte, existing objectStore, dst []packedObject) (incoming []packedObject, ok bool) {
 	defer func() {
 		if e := recover(); e != nil {
 			if _, isPack := e.(invalidPack); !isPack {
@@ -168,8 +197,22 @@ func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
 	if (version != 2 && version != 3) || count > (end-12)/3 || !bytes.Equal(digest[:], data[end:]) {
 		badPack()
 	}
-	p := packReader{bytes.NewReader(data[12:end])}
-	incoming = make(objectStore, min(count, 4096))
+	if count <= cap(dst) {
+		if decoded, full := fullEntries(data[12:end], count, dst); full {
+			return decoded, true
+		}
+	}
+	decoded := unpackEntries(data[12:end], count, existing)
+	for id, item := range decoded {
+		dst = append(dst, packedObject{id: id, object: item})
+	}
+	return dst, true
+}
+
+func unpackEntries(data []byte, count int, existing objectStore) objectStore {
+	end := len(data) + 12
+	p := packReader{bytes.NewReader(data)}
+	incoming := make(objectStore, min(count, 4096))
 	var offsets map[int]*object
 	type deltaEntry struct {
 		offset, baseOffset int
@@ -267,7 +310,7 @@ func unpack(data []byte, existing objectStore) (incoming objectStore, ok bool) {
 		}
 		pending = next
 	}
-	return incoming, true
+	return incoming
 }
 
 var deflaters sync.Pool

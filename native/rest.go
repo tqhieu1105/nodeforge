@@ -77,14 +77,11 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 	}
 	name, sub, _ := strings.Cut(tail, "/")
 	if sub == "issues" && method == "POST" {
-		var input *issueInput
-		if !decodeJSON(w, req, &input) || input == nil {
-			fail(400, "Expected a JSON object")
-		}
+		input := readIssueInput(w, req)
 		f.mu.Lock()
 		item := func() *issue {
 			defer f.mu.Unlock()
-			return f.createIssue(f.requireRepo(owner, name), *input)
+			return f.createIssue(f.requireRepo(owner, name), input)
 		}()
 		sendBytes(w, 201, jsonMedia, item.wire)
 		return
@@ -123,6 +120,7 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 		case "DELETE":
 			delete(f.repos, strings.ToLower(name))
 			delete(f.repoIDs, repo.info.ID)
+			f.issueEpoch.Add(1)
 			sendBytes(w, 204, jsonMedia, nil)
 			return
 		}
@@ -211,7 +209,7 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 		switch endpoint {
 		case "":
 			if method == "PATCH" {
-				sendBytes(w, 200, jsonMedia, updateIssue(repo, item, input).wire)
+				sendBytes(w, 200, jsonMedia, f.updateIssue(repo, item, input).wire)
 				return
 			}
 		case "comments":
@@ -248,6 +246,12 @@ func (f *forge) rest(w http.ResponseWriter, req *http.Request) {
 	missing()
 }
 
+type issueReply struct {
+	epoch  uint64
+	header []byte
+	body   []byte
+}
+
 func (f *forge) issueRead(w http.ResponseWriter, owner, name string, number int) {
 	f.mu.RLock()
 	repo := f.findRepo(owner, name)
@@ -255,9 +259,18 @@ func (f *forge) issueRead(w http.ResponseWriter, owner, name string, number int)
 	if repo != nil {
 		item = repo.issues[number]
 	}
+	epoch := f.issueEpoch.Load()
 	f.mu.RUnlock()
 	if item == nil {
 		missing()
+	}
+	if response, ok := w.(*wireResponse); ok && response.request != nil &&
+		response.request.request.Body == http.NoBody && len(item.wire) <= 16<<10 {
+		// A parsed GET belongs to this connection and includes its authorization.
+		header := append(make([]byte, 0, 100), "HTTP/1.1 200 OK\r\nContent-Type: "+jsonMedia+"\r\nContent-Length: "...)
+		header = strconv.AppendInt(header, int64(len(item.wire)), 10)
+		header = append(header, "\r\nDate: "...)
+		response.request.issue = issueReply{epoch: epoch, header: header, body: item.wire}
 	}
 	sendBytes(w, 200, jsonMedia, item.wire)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -36,6 +37,9 @@ func (s *httpListener) serve() error {
 		conn, err := s.Accept()
 		if err != nil {
 			return err
+		}
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetNoDelay(true)
 		}
 		s.mu.Lock()
 		if s.closed || len(s.active) >= 512 {
@@ -98,11 +102,124 @@ func (b *trackedBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+type requestTemplate struct {
+	header  []byte
+	request *http.Request
+	issue   issueReply
+	git     gitTarget
+}
+
+// Remember complete headers only after the standard parser validates them.
+// Each entry belongs to one connection and compares the complete header block.
+type requestReader struct {
+	reader    *bufio.Reader
+	preview   *bufio.Reader
+	header    bytes.Reader
+	templates [8]requestTemplate
+	next      int
+	body      fixedBody
+	current   *requestTemplate
+	last      *requestTemplate
+}
+
+type fixedBody struct {
+	reader *bufio.Reader
+	left   int64
+}
+
+func (b *fixedBody) Read(p []byte) (int, error) {
+	if b.left == 0 {
+		return 0, io.EOF
+	}
+	n, err := b.reader.Read(p[:min(int64(len(p)), b.left)])
+	b.left -= int64(n)
+	if b.left == 0 {
+		return n, io.EOF
+	}
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+func (b *fixedBody) Close() error { return nil }
+
+func (b *fixedBody) take(size int) []byte {
+	if b.left != int64(size) || b.reader.Buffered() < size {
+		return nil
+	}
+	data, _ := b.reader.Peek(size)
+	_, _ = b.reader.Discard(size)
+	b.left = 0
+	// The returned view is valid until the connection reads again.
+	return data
+}
+
+func (r *requestReader) use(entry *requestTemplate) *http.Request {
+	_, _ = r.reader.Discard(len(entry.header))
+	request := entry.request
+	if request.ContentLength > 0 {
+		r.body.reader = r.reader
+		r.body.left = request.ContentLength
+		request.Body = &r.body
+	}
+	r.current, r.last = entry, entry
+	return request
+}
+
+func (r *requestReader) read() (*http.Request, error) {
+	r.current = nil
+	if _, err := r.reader.Peek(1); err != nil {
+		return nil, err
+	}
+	buffer, _ := r.reader.Peek(r.reader.Buffered())
+	if r.last != nil && bytes.HasPrefix(buffer, r.last.header) {
+		return r.use(r.last), nil
+	}
+	for i := range r.templates {
+		entry := &r.templates[i]
+		if entry != r.last && entry.request != nil && bytes.HasPrefix(buffer, entry.header) {
+			return r.use(entry), nil
+		}
+	}
+	end := bytes.Index(buffer, []byte("\r\n\r\n"))
+	if end < 0 || end+4 > 1024 {
+		return http.ReadRequest(r.reader)
+	}
+	// Parse an independent view, so observing the header cannot read any body
+	// or pipelined request. The normal parser handles unsupported framing.
+	header := buffer[:end+4]
+	r.header.Reset(header)
+	if r.preview == nil {
+		r.preview = bufio.NewReaderSize(&r.header, 1024)
+	} else {
+		r.preview.Reset(&r.header)
+	}
+	request, err := http.ReadRequest(r.preview)
+	if err != nil || request.ProtoMajor != 1 || request.ProtoMinor != 1 ||
+		request.Close || request.Host == "" || len(request.TransferEncoding) != 0 ||
+		request.ContentLength < 0 || request.Header.Get("Expect") != "" ||
+		bytes.Contains(header, []byte("\n ")) || bytes.Contains(header, []byte("\n\t")) {
+		return http.ReadRequest(r.reader)
+	}
+	entry := &r.templates[r.next]
+	r.next = (r.next + 1) % len(r.templates)
+	entry.header = append(entry.header[:0], header...)
+	entry.request = request
+	entry.issue = issueReply{}
+	entry.git = gitTarget{}
+	return r.use(entry), nil
+}
+
 type wireResponse struct {
 	headers http.Header
 	media   string
 	data    []byte
 	status  int
+	id      uint64
+	noCache bool
+	input   []byte
+	request *requestTemplate
 }
 
 func (w *wireResponse) Header() http.Header { return w.headers }
@@ -124,6 +241,8 @@ func (w *wireResponse) reset() {
 	w.status = 0
 	w.data = nil
 	w.media = ""
+	w.id = 0
+	w.noCache = false
 }
 
 type headerBuffer struct{ data []byte }
@@ -177,11 +296,15 @@ func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool
 		buffer = append(buffer, w.media...)
 		buffer = append(buffer, "\r\n"...)
 	}
-	if ids := w.headers["X-Github-Request-Id"]; len(w.headers) == 1 && len(ids) == 1 {
+	if w.id != 0 {
 		buffer = append(buffer, "X-Github-Request-Id: "...)
-		buffer = append(buffer, ids[0]...)
+		buffer = strconv.AppendUint(buffer, w.id, 16)
 		buffer = append(buffer, "\r\n"...)
-	} else {
+	}
+	if w.noCache {
+		buffer = append(buffer, "Cache-Control: no-cache\r\n"...)
+	}
+	if len(w.headers) != 0 {
 		head := headerBuffer{data: buffer}
 		if err := w.headers.WriteSubset(&head, framingHeaders); err != nil {
 			return err
@@ -202,6 +325,21 @@ func (w *wireResponse) send(conn net.Conn, request *http.Request, closeConn bool
 	return err
 }
 
+func (reply issueReply) send(conn net.Conn, date string, id uint64, scratch []byte) error {
+	packet := append(scratch[:0], reply.header...)
+	packet = append(packet, date...)
+	packet = append(packet, "\r\nX-GitHub-Request-Id: "...)
+	packet = strconv.AppendUint(packet, id, 16)
+	packet = append(packet, "\r\n\r\n"...)
+	if len(packet)+len(reply.body) <= cap(packet) {
+		_, err := conn.Write(append(packet, reply.body...))
+		return err
+	}
+	chunks := net.Buffers{packet, reply.body}
+	_, err := chunks.WriteTo(conn)
+	return err
+}
+
 const malformedHTTP = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 25\r\n\r\n{\"message\":\"Bad Request\"}"
 
 func (s *httpListener) connection(conn net.Conn) {
@@ -213,9 +351,11 @@ func (s *httpListener) connection(conn net.Conn) {
 		s.workers.Done()
 	}()
 	in := &headerReader{conn: conn}
-	reader := bufio.NewReaderSize(in, 4096)
+	reader := requestReader{reader: bufio.NewReaderSize(in, 4096)}
 	head := make([]byte, 0, 4096)
 	response := wireResponse{headers: make(http.Header, 6)}
+	forge, _ := s.handler.(*forge)
+	var body trackedBody
 	var deadline time.Time
 	var dateSecond int64
 	var date string
@@ -227,7 +367,7 @@ func (s *httpListener) connection(conn net.Conn) {
 			_ = conn.SetDeadline(deadline)
 		}
 		in.left, in.limited = maxHeader, true
-		request, err := http.ReadRequest(reader)
+		request, err := reader.read()
 		in.limited = false
 		if err == io.EOF {
 			return
@@ -247,26 +387,36 @@ func (s *httpListener) connection(conn net.Conn) {
 		if now.Unix() != dateSecond {
 			dateSecond, date = now.Unix(), now.UTC().Format(http.TimeFormat)
 		}
-		var body *trackedBody
-		if request.Body != http.NoBody {
-			body = &trackedBody{ReadCloser: request.Body}
-			request.Body = body
+		if forge != nil && reader.current != nil {
+			reply := reader.current.issue
+			if reply.body != nil && reply.epoch == forge.issueEpoch.Load() {
+				if reply.send(conn, date, forge.requests.Add(1), head) != nil {
+					return
+				}
+				continue
+			}
+		}
+		hasBody := request.Body != http.NoBody
+		if hasBody {
+			body = trackedBody{ReadCloser: request.Body}
+			request.Body = &body
 		}
 		closeConn := request.Close
+		response.request = reader.current
 		if expect := request.Header.Get("Expect"); expect != "" {
 			if !strings.EqualFold(expect, "100-continue") {
 				sendJSON(&response, 417, fields{"message": "Expectation Failed"})
 				_ = response.send(conn, request, true, date, head)
 				return
 			}
-			if body != nil {
+			if hasBody {
 				if _, err := io.WriteString(conn, "HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
 					return
 				}
 			}
 		}
 		s.handler.ServeHTTP(&response, request)
-		if body != nil && !body.complete {
+		if hasBody && !body.complete {
 			// Unread body bytes may precede the next request on this socket.
 			closeConn = true
 		}

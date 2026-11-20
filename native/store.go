@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"regexp"
 	"sort"
 	"strings"
@@ -151,7 +150,7 @@ func inputIssue(in fields) issueInput {
 }
 
 func (r *repository) saveIssue(item *issue) *issue {
-	item.wire, _ = json.Marshal(item)
+	item.wire = item.jsonBytes()
 	r.issues[item.Number] = item
 	return item
 }
@@ -178,7 +177,7 @@ func (f *forge) createIssue(r *repository, in issueInput) *issue {
 	})
 }
 
-func updateIssue(r *repository, current *issue, in fields) *issue {
+func (f *forge) updateIssue(r *repository, current *issue, in fields) *issue {
 	next := *current
 	if state := text(in["state"]); state == "open" || state == "closed" {
 		next.State = state
@@ -189,7 +188,9 @@ func updateIssue(r *repository, current *issue, in fields) *issue {
 	if body, ok := in["body"].(string); ok {
 		next.Body = body
 	}
-	return r.saveIssue(&next)
+	r.saveIssue(&next)
+	f.issueEpoch.Add(1)
+	return &next
 }
 
 func (f *forge) addComment(r *repository, number int, input any) comment {

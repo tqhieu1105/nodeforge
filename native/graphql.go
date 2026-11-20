@@ -576,7 +576,7 @@ func (f *forge) mutationView() *graphView {
 				missing()
 			}
 			if name == "closeIssue" {
-				i := updateIssue(r, r.issues[num], fields{"state": "closed"})
+				i := f.updateIssue(r, r.issues[num], fields{"state": "closed"})
 				return view("IssuePayload", fields{"issue": issueView(r, i)})
 			}
 			c := f.addComment(r, num, in["body"])

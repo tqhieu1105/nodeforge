@@ -77,13 +77,22 @@ func packetList(lines ...string) []byte {
 
 var v2Advertisement = packetList(
 	"version 2\n",
-	"agent=forge/1.0\n",
 	"ls-refs=unborn\n",
 	"fetch=shallow\n",
-	"object-format=sha1\n",
 )
 var serviceUploadPrefix = packetList("# service=" + uploadPack + "\n")
 var serviceReceivePrefix = packetList("# service=" + receivePack + "\n")
+
+const receiveCapabilities = "report-status side-band-64k delete-refs ofs-delta"
+
+var emptyReceiveAdvertisement = receiveAdvertisement(zeroOID, "capabilities^{}")
+
+func receiveAdvertisement(sha, ref string) []byte {
+	reply := make([]byte, 0, len(serviceReceivePrefix)+len(sha)+len(ref)+len(receiveCapabilities)+11)
+	reply = append(reply, serviceReceivePrefix...)
+	reply = pkt(reply, sha+" "+ref+"\x00"+receiveCapabilities+"\n")
+	return append(reply, flush...)
+}
 
 func (r *repository) peel(sha string) string {
 	start := sha
@@ -104,7 +113,17 @@ func (r *repository) advertise(service string, v2 bool) []byte {
 	if v2 {
 		return v2Advertisement
 	}
-	capabilities := "report-status side-band-64k delete-refs ofs-delta"
+	if service == receivePack {
+		switch len(r.refs) {
+		case 0:
+			return emptyReceiveAdvertisement
+		case 1:
+			for ref, sha := range r.refs {
+				return receiveAdvertisement(sha, ref)
+			}
+		}
+	}
+	capabilities := receiveCapabilities
 	prefix := serviceReceivePrefix
 	var b []byte
 	first := true
@@ -194,7 +213,8 @@ func (r *repository) receive(data []byte) []byte {
 	}
 	var features string
 	lines[0], features, _ = strings.Cut(lines[0], "\x00")
-	updates := make([]refUpdate, 0, len(lines))
+	var first [1]refUpdate
+	updates := first[:0]
 	needsPack := false
 	for _, line := range lines {
 		old, rest, _ := strings.Cut(line, " ")
@@ -207,19 +227,21 @@ func (r *repository) receive(data []byte) []byte {
 	}
 	unpackError := ""
 	if needsPack || len(payload) > 0 {
-		incoming, ok := unpack(payload, r.objects)
+		var storage [8]packedObject
+		incoming, ok := unpack(payload, r.objects, storage[:0])
 		if !ok {
 			unpackError = "invalid pack"
 		} else {
-			for id, item := range incoming {
-				if r.objects[id] == nil {
-					r.objects[id] = item
+			for _, item := range incoming {
+				if r.objects[item.id] == nil {
+					r.objects[item.id] = item.object
 					r.uploadCache = nil
 				}
 			}
 		}
 	}
-	var b []byte
+	var scratch [128]byte
+	b := scratch[:0]
 	if unpackError == "" {
 		b = pkt(b, "unpack ok\n")
 	} else {
@@ -247,7 +269,8 @@ func (r *repository) receive(data []byte) []byte {
 		b = nil
 	}
 	if side {
-		b = append(sideband(nil, b), flush...)
+		framed := make([]byte, 0, len(b)+9)
+		return append(sideband(framed, b), flush...)
 	}
 	return b
 }
@@ -485,7 +508,12 @@ func (r *repository) upload(body []byte, v2 bool) []byte {
 	return reply
 }
 
-func (f *forge) smartHTTP(w http.ResponseWriter, req *http.Request) {
+type gitTarget struct {
+	owner, name, service, media string
+	v2, advertise               bool
+}
+
+func parseGitTarget(req *http.Request) gitTarget {
 	owner, rest, ok := strings.Cut(strings.TrimPrefix(req.URL.Path, "/"), "/")
 	name, endpoint, found := strings.Cut(rest, "/")
 	if !ok || !found || !strings.HasSuffix(name, ".git") {
@@ -508,44 +536,68 @@ func (f *forge) smartHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	}
-	w.Header().Set("Cache-Control", "no-cache")
+	target := gitTarget{owner: owner, name: name, service: service, v2: v2}
 	if req.Method == "GET" && endpoint == "info/refs" {
-		f.mu.RLock()
-		defer f.mu.RUnlock()
-		repo := f.requireRepo(owner, name)
-		sendBytes(w, 200, "application/x-"+service+"-advertisement", repo.advertise(service, v2))
-		return
-	}
-	if req.Method != "POST" || endpoint != service {
+		target.advertise = true
+		target.media = "application/x-" + service + "-advertisement"
+	} else if req.Method == "POST" && endpoint == service {
+		target.media = "application/x-" + service + "-result"
+	} else {
 		missing()
 	}
-	data := requestBody(w, req, 64<<20)
-	media := "application/x-" + service + "-result"
-	// Cached replies are immutable and remain safe to send after unlocking.
-	if v2 && len(data) <= 1024 {
+	return target
+}
+
+func (f *forge) smartHTTP(w http.ResponseWriter, req *http.Request) {
+	var target gitTarget
+	response, wired := w.(*wireResponse)
+	if wired {
+		response.noCache = true
+		if response.request != nil {
+			target = response.request.git
+		}
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	if target.service == "" {
+		target = parseGitTarget(req)
+		if wired && response.request != nil {
+			response.request.git = target
+		}
+	}
+	if target.advertise {
 		f.mu.RLock()
-		repo := f.findRepo(owner, name)
+		defer f.mu.RUnlock()
+		repo := f.requireRepo(target.owner, target.name)
+		sendBytes(w, 200, target.media, repo.advertise(target.service, target.v2))
+		return
+	}
+	data := requestBody(w, req, 64<<20)
+	// Cached replies are immutable and remain safe to send after unlocking.
+	if target.v2 && len(data) <= 1024 {
+		f.mu.RLock()
+		repo := f.findRepo(target.owner, target.name)
 		var reply []byte
 		if repo != nil {
 			reply = repo.uploadCache[string(data)]
 		}
 		f.mu.RUnlock()
 		if reply != nil {
-			sendBytes(w, 200, media, reply)
+			sendBytes(w, 200, target.media, reply)
 			return
 		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	repo := f.requireRepo(owner, name)
+	repo := f.requireRepo(target.owner, target.name)
 	var result []byte
-	if service == receivePack {
+	if target.service == receivePack {
 		result = repo.receive(data)
 	} else {
-		result = repo.upload(data, v2)
+		result = repo.upload(data, target.v2)
 	}
-	if len(result) > 2048 {
+	if !wired && len(result) > 2048 {
 		w.Header().Set("Content-Length", strconv.Itoa(len(result)))
 	}
-	sendBytes(w, 200, media, result)
+	sendBytes(w, 200, target.media, result)
 }
